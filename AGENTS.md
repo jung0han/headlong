@@ -113,3 +113,20 @@ Replies take 15 to 45 seconds while the monolith thinker wakes.
 - The dashboard binds localhost by default and `0.0.0.0` in a container.
   A failed dashboard does not fail the install; check `dash.status` in
   `status.json` and `<state-home>/logs/web.log`.
+
+## Agent skills
+
+### Issue tracker
+
+Work Items are tracked in the Linear `HeadLong` project under the `정동우`
+team. GitHub remains the code, pull request, and upstream collaboration
+surface. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the canonical triage labels without aliases. See
+`docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This is a single-context repository. See `docs/agents/domain.md`.
