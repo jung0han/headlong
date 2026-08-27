@@ -56,6 +56,20 @@ def build_parser() -> argparse.ArgumentParser:
     reference_show.add_argument("source_id")
     reference_show.add_argument("revision_id")
 
+    memory = commands.add_parser("memory", help="review and project Active Memory")
+    memory_commands = memory.add_subparsers(dest="memory_command", required=True)
+    candidates = memory_commands.add_parser("candidates")
+    _memory_scope_args(candidates)
+    memory_list = memory_commands.add_parser("list")
+    _memory_scope_args(memory_list)
+    remember = memory_commands.add_parser("remember")
+    remember.add_argument("content")
+    _memory_authority_args(remember)
+    accept = memory_commands.add_parser("accept")
+    accept.add_argument("candidate_event_id")
+    _memory_authority_args(accept)
+    memory_commands.add_parser("rebuild")
+
     follow = commands.add_parser("follow-codex", help="collect active Codex records once")
     _source_root_args(follow)
 
@@ -78,6 +92,20 @@ def _source_root_args(parser: argparse.ArgumentParser) -> None:
         type=Path,
         default=codex_home / "archived_sessions",
     )
+
+
+def _memory_scope_args(parser: argparse.ArgumentParser) -> None:
+    scope = parser.add_mutually_exclusive_group()
+    scope.add_argument("--project")
+    scope.add_argument("--global", dest="global_scope", action="store_true")
+
+
+def _memory_authority_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--kind", choices=("decision", "preference", "constraint"), required=True
+    )
+    parser.add_argument("--key", required=True)
+    _memory_scope_args(parser)
 
 
 def run(argv: list[str] | None = None) -> int:
@@ -119,6 +147,44 @@ def run(argv: list[str] | None = None) -> int:
                 result = assistant.reference(args.source_id, args.revision_id)
                 if result is None:
                     raise AssistantError("Reference revision not found")
+        elif args.command == "memory":
+            if args.memory_command == "rebuild":
+                result = assistant.rebuild_active_memory()
+            elif args.memory_command == "candidates":
+                project = args.project
+                if not args.global_scope and project is None:
+                    project = str(Path.cwd())
+                result = {
+                    "memory_candidates": assistant.memory_candidates(
+                        project, global_only=args.global_scope
+                    )
+                }
+            elif args.memory_command == "list":
+                project = args.project
+                if not args.global_scope and project is None:
+                    project = str(Path.cwd())
+                result = {
+                    "active_memories": assistant.active_memories(
+                        project, global_only=args.global_scope
+                    )
+                }
+            elif args.memory_command == "remember":
+                result = assistant.remember_memory(
+                    args.content,
+                    memory_kind=args.kind,
+                    memory_key=args.key,
+                    project_selector=args.project,
+                    global_scope=args.global_scope,
+                    current_path=Path.cwd(),
+                )
+            else:
+                result = assistant.accept_memory_candidate(
+                    args.candidate_event_id,
+                    memory_kind=args.kind,
+                    memory_key=args.key,
+                    project_selector=args.project,
+                    global_scope=args.global_scope,
+                )
         elif args.command == "follow-codex":
             result = assistant.follow_codex_once(
                 args.sessions_root, args.archived_sessions_root
