@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# bubblewrap is a shared system sandbox package and is deliberately retained.
 set -euo pipefail
 
 # Remove only Personal Assistant supervision. Identity state, the dashboard,

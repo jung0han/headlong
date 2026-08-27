@@ -1081,6 +1081,7 @@ class PersonalAssistant:
         description: str,
         *,
         downstream_event_id: str | None = None,
+        downstream_step_id: str | None = None,
     ) -> dict[str, Any]:
         """Record observed memory harm or lesser quality feedback."""
         with self._state_lock():
@@ -1092,25 +1093,52 @@ class PersonalAssistant:
             if target is None:
                 raise AssistantError(f"Active Memory not found: {memory_event_id}")
             downstream = None
-            if downstream_event_id is not None:
-                downstream = next(
-                    (
-                        event
-                        for event in events
-                        if event.get("event_id") == downstream_event_id
-                    ),
-                    None,
+            downstream_locator = None
+            if downstream_event_id is not None and downstream_step_id is not None:
+                raise AssistantError(
+                    "select either a downstream Proposal event or native action step"
                 )
-                if downstream is None:
-                    raise AssistantError(
-                        f"Downstream proposal or action event not found: {downstream_event_id}"
+            downstream_reference_id = downstream_event_id or downstream_step_id
+            if downstream_reference_id is not None:
+                matches = [
+                    event
+                    for event in events
+                    if (
+                        downstream_event_id is not None
+                        and event.get("event_id") == downstream_reference_id
                     )
+                    or (
+                        downstream_step_id is not None
+                        and event.get("type") == "action"
+                        and event.get("step_id") == downstream_reference_id
+                    )
+                ]
+                if len(matches) != 1:
+                    raise AssistantError(
+                        "Downstream proposal or action event not found: "
+                        f"{downstream_reference_id}"
+                    )
+                downstream = matches[0]
+                if events.index(downstream) <= events.index(target):
+                    raise AssistantError(
+                        "Downstream proposal or action must follow the Active Memory"
+                    )
+                if downstream.get("type") == "action":
+                    try:
+                        downstream_locator = memory_failures.action_locator(
+                            downstream,
+                            source_identity=self.identity.id,
+                            trajectory_id=str(self.identity.root_trajectory),
+                        )
+                    except memory_failures.MemoryFailureError as exc:
+                        raise AssistantError(str(exc)) from exc
             try:
                 event = memory_failures.issue_event(
                     target,
                     classification,
                     description,
                     downstream_event=downstream,
+                    downstream_locator=downstream_locator,
                 )
                 self._append_event(event)
                 if event["record_kind"] == "memory_failure":

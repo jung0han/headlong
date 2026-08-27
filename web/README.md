@@ -145,4 +145,6 @@ Session UUID plus `archive` or `unarchive`; the web process does not execute
 Codex archive commands or edit session files directly. It persists the signed
 attempt result before replying, so a lost socket response is reported as
 indeterminate and a retry reconciles the same attempt without repeating a
-completed mutation.
+completed mutation. The trusted service keeps journal-signing access, but runs
+the external Codex process in a bubblewrap mount namespace where the Authority
+Journal is masked and only `CODEX_HOME` is writable.

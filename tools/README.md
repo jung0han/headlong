@@ -37,12 +37,15 @@ tools live in [bin/](../bin/).
   archive execution. `memory-failure report/list/quality/health` records the three
   domain Memory Failure classes while retaining duplicate/wording feedback as
   quality observations. A `behavior_affecting` report also requires
-  `--downstream-event-id` for a concrete proposal/action event with evidence.
+  `--downstream-event-id` for a concrete Proposal event or
+  `--downstream-step-id` for a native action; action reports retain a trajectory
+  locator and compact snapshot.
   `native-memory rebuild/restore` recovers the native
   Markdown store from its Activity Ledger history.
 - `headlong-archive-boundary` serves the authenticated, archive-only Unix
   socket used by production assistant routes; it exposes no general command
-  execution interface.
+  execution interface. External Codex runs in a child mount namespace that
+  masks the Authority Journal and grants write access only to `CODEX_HOME`.
 - `shellm-docker-broker` is the host-side policy server for brokered
   Docker. It is never present in the mind's environment.
 - `shellm-explore` visualizes run trees, `pr-committee` runs multi-model

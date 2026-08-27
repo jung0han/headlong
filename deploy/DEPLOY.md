@@ -201,7 +201,12 @@ Archive and unarchive execution runs in the separately hardened
 request to `/run/headlong-archive/archive.sock`; the service independently
 verifies the signed Archive Directive or accepted Archive Candidate before it
 invokes Codex. The web and source-bridge units have read-only access to the
-default `CODEX_HOME`, and Observer thinkers cannot access the socket.
+default `CODEX_HOME`, and Observer thinkers cannot access the socket. The
+boundary retains Authority Journal signing access, while each external Codex
+child runs in a bubblewrap mount namespace with the journal masked and only
+`CODEX_HOME` writable. Setup installs bubblewrap; update repairs a missing
+installation. Assistant-service uninstall leaves this shared system package in
+place.
 
 The shipped boundary uses `CODEX_HOME=/opt/shellm/.codex`. When Codex state is
 elsewhere, set one absolute `CODEX_HOME` in `/etc/headlong/assistant.env` before
@@ -217,7 +222,9 @@ after a reproducible Memory Failure—wrong Knowledge Scope, contradiction with
 evidence, or a material degradation of a proposal or action. Duplication or
 awkward wording alone is quality feedback, not a Memory Failure. A
 behavior-affecting report must identify the concrete downstream proposal or
-action event, whose evidence locators are retained for reproduction.
+native action step. Proposals retain their event Evidence Locators; native
+actions retain a stable root-trajectory step locator plus a compact immutable
+snapshot and content digest.
 
 Before enabling a new Observer, render and verify the shipped units without
 touching production:

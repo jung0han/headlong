@@ -207,6 +207,7 @@ class MemoryFailureBody(BaseModel):
     ]
     description: str
     downstream_event_id: str | None = None
+    downstream_step_id: str | None = None
 
     model_config = {"extra": "forbid"}
 
@@ -951,6 +952,7 @@ def create_app(
                 body.classification,
                 body.description,
                 downstream_event_id=body.downstream_event_id,
+                downstream_step_id=body.downstream_step_id,
             )
         except assistant.AssistantError as exc:
             status = 404 if "not found" in str(exc) else 422

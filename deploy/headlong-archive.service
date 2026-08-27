@@ -15,6 +15,7 @@ Environment="PATH=@SHELLM_HOME@/.local/bin:/usr/local/bin:/usr/bin:/bin"
 Environment="CODEX_HOME=@CODEX_HOME@"
 RuntimeDirectory=headlong-archive
 RuntimeDirectoryMode=0700
+ExecCondition=/usr/bin/test -x /usr/bin/bwrap
 ExecStart=/bin/bash @SHELLM_HOME@/app/tools/headlong-archive-boundary --root @SHELLM_HOME@/app --socket /run/headlong-archive/archive.sock
 Restart=on-failure
 RestartSec=5

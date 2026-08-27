@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -306,3 +307,55 @@ def test_transport_loss_reconciles_durable_attempt_without_duplicate_mutation(
 
     assert reconciled.state == "succeeded"
     assert executor.calls == [("archive", SESSION_ID)]
+
+
+def test_production_boundary_spawns_codex_without_authority_access(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "headlong"
+    root.mkdir()
+    identity_id = ".identities~observer"
+    _authorized_attempt(root, identity_id)
+    authority_dir = root / ".assistant-authority"
+    codex_home = tmp_path / "codex-home"
+    fake_bin = tmp_path / "bin"
+    codex_home.mkdir()
+    fake_bin.mkdir()
+    fake_codex = fake_bin / "codex"
+    fake_codex.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+if [[ -r "$HEADLONG_AUTHORITY_DIR" ]]; then exit 41; fi
+if printf forged >"$HEADLONG_AUTHORITY_DIR/forged" 2>/dev/null; then exit 42; fi
+if [[ "${2:-}" == "--help" ]]; then
+    printf 'Usage: codex %s [OPTIONS] <SESSION>\n' "$1"
+    exit 0
+fi
+printf '%s:%s\n' "$1" "$2" >"$CODEX_HOME/archive-result"
+"""
+    )
+    fake_codex.chmod(0o755)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
+    socket_path = tmp_path / "archive.sock"
+    server = threading.Thread(
+        target=archive_boundary.serve,
+        args=(root, socket_path),
+        kwargs={"max_requests": 1},
+        daemon=True,
+    )
+    server.start()
+    for _ in range(100):
+        if socket_path.exists():
+            break
+        time.sleep(0.002)
+
+    result = archive_boundary.ArchiveBoundaryClient(
+        identity_id, socket_path=socket_path, timeout=5
+    ).execute("archive", SESSION_ID, AUTH_ID)
+    server.join(timeout=5)
+
+    assert not server.is_alive()
+    assert result.state == "succeeded"
+    assert (codex_home / "archive-result").read_text() == f"archive:{SESSION_ID}\n"
+    assert authority_dir.is_dir()

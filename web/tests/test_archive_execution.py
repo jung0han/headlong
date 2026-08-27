@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -223,6 +224,48 @@ def test_codex_adapter_probes_both_commands_before_narrow_execution():
         ("codex-test", "unarchive", "--help"),
         ("codex-test", "archive", SESSION_ID),
     ]
+
+
+def test_external_codex_process_cannot_read_or_forge_authority_journal(
+    tmp_path: Path,
+) -> None:
+    bubblewrap = shutil.which("bwrap")
+    assert bubblewrap is not None, "bubblewrap is a production archive dependency"
+    codex_home = tmp_path / "codex-home"
+    authority_dir = tmp_path / "app" / ".assistant-authority"
+    codex_home.mkdir()
+    authority_dir.mkdir(parents=True)
+    signing_key = authority_dir / "signing.key"
+    signing_key.write_text("boundary-secret")
+    fake_codex = tmp_path / "codex"
+    fake_codex.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+if [[ -r "$HEADLONG_AUTHORITY_DIR/signing.key" ]]; then exit 41; fi
+if printf forged >"$HEADLONG_AUTHORITY_DIR/forged" 2>/dev/null; then exit 42; fi
+if [[ "${2:-}" == "--help" ]]; then
+    printf 'Usage: codex %s [OPTIONS] <SESSION>\n' "$1"
+    exit 0
+fi
+printf '%s:%s\n' "$1" "$2" >"$CODEX_HOME/archive-result"
+"""
+    )
+    fake_codex.chmod(0o755)
+    executor = archive_execution.SandboxedCodexCommandExecutor(
+        codex_home=codex_home,
+        authority_dir=authority_dir,
+        bubblewrap=bubblewrap,
+    )
+    adapter = archive_execution.CodexArchiveAdapter(
+        executor=executor, binary=str(fake_codex)
+    )
+
+    result = adapter.execute("archive", SESSION_ID)
+
+    assert result == archive_execution.AdapterResult("succeeded", exit_code=0)
+    assert (codex_home / "archive-result").read_text() == f"archive:{SESSION_ID}\n"
+    assert signing_key.read_text() == "boundary-secret"
+    assert not (authority_dir / "forged").exists()
 
 
 def test_codex_adapter_fails_closed_for_incomplete_or_missing_contract():
