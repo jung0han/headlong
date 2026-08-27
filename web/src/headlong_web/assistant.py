@@ -37,6 +37,7 @@ LOCATOR_SCHEMA = "headlong.evidence-locator/v1"
 ANALYSIS_SCHEMA = "headlong.codex-observation/v1"
 WEB_SELECTION_SCHEMA = "headlong.web-reference-selection/v1"
 SOURCE_EVENT_SCHEMA = "headlong.codex-source-event/v1"
+WEB_SOURCE_KINDS = {"url", "rss", "documentation"}
 _EVENT_NAMESPACE = uuid.UUID("88d66cf8-0918-4593-974e-71e544b6fd5b")
 _MAX_TITLE = 160
 _MAX_OBSERVATION = 1200
@@ -61,9 +62,10 @@ class RegisteredWebSource:
     id: str
     name: str
     url: str
+    kind: str = "url"
 
     def to_dict(self) -> dict[str, str]:
-        return {"id": self.id, "name": self.name, "url": self.url}
+        return {"id": self.id, "name": self.name, "url": self.url, "kind": self.kind}
 
 
 @dataclass(frozen=True)
@@ -253,11 +255,17 @@ class PersonalAssistant:
     def web_sources(self) -> list[RegisteredWebSource]:
         data = self._read_registrations()
         return [
-            RegisteredWebSource(item["id"], item["name"], item["url"])
+            RegisteredWebSource(
+                item["id"], item["name"], item["url"], item.get("kind", "url")
+            )
             for item in data["web_sources"]
         ]
 
-    def add_web_source(self, url: str, name: str | None = None) -> RegisteredWebSource:
+    def add_web_source(
+        self, url: str, name: str | None = None, kind: str = "url"
+    ) -> RegisteredWebSource:
+        if kind not in WEB_SOURCE_KINDS:
+            raise AssistantError(f"unsupported Registered Web Source kind: {kind}")
         try:
             canonical = references.canonical_public_url(url)
         except references.ReferenceError as exc:
@@ -266,6 +274,7 @@ class PersonalAssistant:
             references.source_id(canonical),
             name or parse_web_source_name(canonical),
             canonical,
+            kind,
         )
         with self._state_lock():
             data = self._read_registrations()
@@ -279,7 +288,10 @@ class PersonalAssistant:
                 self._write_registrations(data)
             else:
                 source = RegisteredWebSource(
-                    existing["id"], existing["name"], existing["url"]
+                    existing["id"],
+                    existing["name"],
+                    existing["url"],
+                    existing.get("kind", "url"),
                 )
         return source
 
@@ -304,7 +316,12 @@ class PersonalAssistant:
                 item for item in data["web_sources"] if item["id"] != removed["id"]
             ]
             self._write_registrations(data)
-        return RegisteredWebSource(removed["id"], removed["name"], removed["url"])
+        return RegisteredWebSource(
+            removed["id"],
+            removed["name"],
+            removed["url"],
+            removed.get("kind", "url"),
+        )
 
     def observe_codex_once(self, active_root: Path, archived_root: Path) -> dict[str, int]:
         """Analyze every currently eligible, not-yet-observed complete session."""
@@ -329,15 +346,17 @@ class PersonalAssistant:
                 result["observed"] += 1
         return result
 
-    def observe_web_once(self) -> dict[str, int]:
+    def observe_web_once(self) -> dict[str, Any]:
         """Fetch and consider every currently Registered Web Source once."""
-        result = {
+        result: dict[str, Any] = {
             "registered": 0,
             "fetched": 0,
             "selected": 0,
             "saved": 0,
             "duplicate": 0,
             "not_selected": 0,
+            "failed": 0,
+            "failures": [],
         }
         # One identity-local lock keeps registrations, model cost, immutable
         # storage, event repair, and dedupe in one deterministic boundary.
@@ -345,24 +364,113 @@ class PersonalAssistant:
             sources = self.web_sources()
             result["registered"] = len(sources)
             for source in sources:
+                attempted_at = _utc_now()
                 try:
                     document = references.fetch_public_document(source.url)
                 except references.ReferenceError as exc:
-                    raise AssistantError(str(exc)) from exc
+                    self._record_web_failure(
+                        source, attempted_at, "fetch", exc.code, result
+                    )
+                    continue
                 result["fetched"] += 1
-                existing = references.read_reference(
-                    self.identity.path, source.id, document.digest, include_text=False
-                )
+                if source.kind == "rss" and document.media_type not in {
+                    "application/rss+xml",
+                    "application/atom+xml",
+                    "application/xml",
+                    "text/xml",
+                }:
+                    self._record_web_failure(
+                        source,
+                        attempted_at,
+                        "fetch",
+                        "rss_content_type_mismatch",
+                        result,
+                    )
+                    continue
+                try:
+                    existing = references.read_reference(
+                        self.identity.path,
+                        source.id,
+                        document.digest,
+                        include_text=False,
+                    )
+                except references.ReferenceError as exc:
+                    self._record_web_failure(
+                        source, attempted_at, "storage", exc.code, result
+                    )
+                    continue
                 if existing is not None:
                     event = reference_revision_event(existing)
-                    if not self._ledger_has(event["event_id"]):
-                        self._append_event(event)
+                    try:
+                        if not self._ledger_has(event["event_id"]):
+                            self._append_event(event)
+                    except AssistantError:
+                        self._record_web_failure(
+                            source, attempted_at, "ledger", "ledger_failed", result
+                        )
+                        continue
                     result["duplicate"] += 1
+                    self._record_web_success(source, attempted_at, document.digest, result)
                     continue
-                selection = self._select_reference(source, document)
-                if not selection["selected"]:
-                    # Rejection evidence and refresh policy are DONGWOO-914.
+                try:
+                    rejected = references.read_rejection(
+                        self.identity.path, source.id, document.digest
+                    )
+                except references.ReferenceError as exc:
+                    self._record_web_failure(
+                        source, attempted_at, "storage", exc.code, result
+                    )
+                    continue
+                if rejected is not None:
+                    event = reference_rejection_event(rejected)
+                    try:
+                        if not self._ledger_has(event["event_id"]):
+                            self._append_event(event)
+                    except AssistantError:
+                        self._record_web_failure(
+                            source, attempted_at, "ledger", "ledger_failed", result
+                        )
+                        continue
+                    result["duplicate"] += 1
                     result["not_selected"] += 1
+                    self._record_web_success(source, attempted_at, document.digest, result)
+                    continue
+                try:
+                    selection = self._select_reference(source, document)
+                except AssistantError:
+                    self._record_web_failure(
+                        source, attempted_at, "selection", "selection_failed", result
+                    )
+                    continue
+                if not selection["selected"]:
+                    judgment = str(
+                        selection["summary"]
+                        or selection["title"]
+                        or "not selected by the Reference selector"
+                    )
+                    try:
+                        rejected, _created = references.store_rejection(
+                            self.identity.path,
+                            document,
+                            rejected_at=attempted_at,
+                            judgment=judgment,
+                        )
+                    except references.ReferenceError as exc:
+                        self._record_web_failure(
+                            source, attempted_at, "storage", exc.code, result
+                        )
+                        continue
+                    event = reference_rejection_event(rejected)
+                    try:
+                        if not self._ledger_has(event["event_id"]):
+                            self._append_event(event)
+                    except AssistantError:
+                        self._record_web_failure(
+                            source, attempted_at, "ledger", "ledger_failed", result
+                        )
+                        continue
+                    result["not_selected"] += 1
+                    self._record_web_success(source, attempted_at, document.digest, result)
                     continue
                 result["selected"] += 1
                 try:
@@ -374,12 +482,78 @@ class PersonalAssistant:
                         summary=selection["summary"],
                     )
                 except references.ReferenceError as exc:
-                    raise AssistantError(str(exc)) from exc
+                    self._record_web_failure(
+                        source, attempted_at, "storage", exc.code, result
+                    )
+                    continue
                 event = reference_revision_event(metadata)
-                if not self._ledger_has(event["event_id"]):
-                    self._append_event(event)
+                try:
+                    if not self._ledger_has(event["event_id"]):
+                        self._append_event(event)
+                except AssistantError:
+                    self._record_web_failure(
+                        source, attempted_at, "ledger", "ledger_failed", result
+                    )
+                    continue
                 result["saved" if created else "duplicate"] += 1
+                self._record_web_success(source, attempted_at, document.digest, result)
         return result
+
+    def web_source_health(self) -> list[dict[str, Any]]:
+        try:
+            return references.read_source_health(self.identity.path)
+        except references.ReferenceError as exc:
+            raise AssistantError(str(exc)) from exc
+
+    def _record_web_success(
+        self,
+        source: RegisteredWebSource,
+        attempted_at: str,
+        digest: str,
+        result: dict[str, Any],
+    ) -> None:
+        try:
+            references.write_source_health(
+                self.identity.path,
+                source_id_value=source.id,
+                source_kind=source.kind,
+                attempted_at=attempted_at,
+                status="healthy",
+                phase="complete",
+                digest=digest,
+            )
+        except references.ReferenceError:
+            result["failed"] += 1
+            result["failures"].append(
+                {"source_id": source.id, "phase": "health", "code": "storage_failed"}
+            )
+
+    def _record_web_failure(
+        self,
+        source: RegisteredWebSource,
+        attempted_at: str,
+        phase: str,
+        code: str,
+        result: dict[str, Any],
+    ) -> None:
+        result["failed"] += 1
+        result["failures"].append(
+            {"source_id": source.id, "phase": phase, "code": code[:80]}
+        )
+        try:
+            references.write_source_health(
+                self.identity.path,
+                source_id_value=source.id,
+                source_kind=source.kind,
+                attempted_at=attempted_at,
+                status="error",
+                phase=phase,
+                error_code=code,
+            )
+        except references.ReferenceError:
+            result["failures"].append(
+                {"source_id": source.id, "phase": "health", "code": "storage_failed"}
+            )
 
     def references(self) -> list[dict[str, Any]]:
         try:
@@ -644,6 +818,15 @@ class PersonalAssistant:
         ):
             raise AssistantError("unsupported registrations.json schema")
         data.setdefault("web_sources", [])
+        for item in data["web_sources"]:
+            if (
+                not isinstance(item, dict)
+                or not isinstance(item.get("id"), str)
+                or not isinstance(item.get("name"), str)
+                or not isinstance(item.get("url"), str)
+                or item.get("kind", "url") not in WEB_SOURCE_KINDS
+            ):
+                raise AssistantError("invalid Registered Web Source")
         return data
 
     def _write_registrations(self, data: dict[str, Any]) -> None:
@@ -821,6 +1004,36 @@ def source_event(
         details={
             "source_event_schema": SOURCE_EVENT_SCHEMA,
             "source_event_type": source_type,
+        },
+    )
+
+
+def reference_rejection_event(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Build compact judgment evidence without retaining rejected body text."""
+    event_id = str(
+        uuid.uuid5(
+            _EVENT_NAMESPACE,
+            f"{WEB_SELECTION_SCHEMA}:rejected:{metadata['source_id']}:"
+            f"{metadata['content_digest']}",
+        )
+    )
+    return activity_event(
+        event_type="reference_rejected",
+        event_id=event_id,
+        source_kind="web_source",
+        source_identity=metadata["source_url"],
+        knowledge_scope={"kind": "global"},
+        evidence_kind="primary_source",
+        verification="observed",
+        authority="rejected",
+        evidence_locators=[metadata["evidence_locator"]],
+        title="Reference not selected",
+        content=metadata["judgment"],
+        details={
+            "selection_schema": WEB_SELECTION_SCHEMA,
+            "reference_source_id": metadata["source_id"],
+            "content_digest": metadata["content_digest"],
+            "rejected_at": metadata["rejected_at"],
         },
     )
 
