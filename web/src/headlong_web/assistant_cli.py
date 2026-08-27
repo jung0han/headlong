@@ -8,6 +8,7 @@ import os
 import sys
 from pathlib import Path
 
+from headlong_web import web_exploration
 from headlong_web.assistant import (
     AssistantError,
     EvidenceLocator,
@@ -48,6 +49,19 @@ def build_parser() -> argparse.ArgumentParser:
     _source_root_args(observe)
 
     commands.add_parser("observe-web", help="consider Registered Web Sources once")
+
+    explore = commands.add_parser(
+        "explore-web", help="run one memory-triggered bounded public exploration"
+    )
+    explore.add_argument("memory_selector")
+    explore.add_argument(
+        "--trigger-kind", choices=("interest", "open_loop"), default="interest"
+    )
+    explore.add_argument("--seed-url", action="append", default=[])
+    explore.add_argument("--max-pages", type=int, default=8)
+    explore.add_argument("--max-depth", type=int, default=2)
+    explore.add_argument("--max-elapsed-seconds", type=float, default=60.0)
+    explore.add_argument("--max-stored-bytes", type=int, default=2_000_000)
 
     reference = commands.add_parser("reference", help="read saved References")
     reference_commands = reference.add_subparsers(dest="reference_command", required=True)
@@ -112,6 +126,18 @@ def run(argv: list[str] | None = None) -> int:
             )
         elif args.command == "observe-web":
             result = assistant.observe_web_once()
+        elif args.command == "explore-web":
+            result = assistant.explore_web_once(
+                args.memory_selector,
+                trigger_kind=args.trigger_kind,
+                seed_urls=tuple(args.seed_url),
+                limits=web_exploration.ExplorationLimits(
+                    max_pages=args.max_pages,
+                    max_depth=args.max_depth,
+                    max_elapsed_seconds=args.max_elapsed_seconds,
+                    max_stored_bytes=args.max_stored_bytes,
+                ),
+            )
         elif args.command == "reference":
             if args.reference_command == "list":
                 result = {"references": assistant.references()}
@@ -139,7 +165,7 @@ def run(argv: list[str] | None = None) -> int:
             }
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0
-    except AssistantError as exc:
+    except (AssistantError, ValueError) as exc:
         print(f"headlong-assistant: error: {exc}", file=sys.stderr)
         return 2
 

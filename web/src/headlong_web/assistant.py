@@ -13,6 +13,7 @@ import json
 import os
 import socket
 import subprocess
+import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -21,7 +22,14 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 from urllib.parse import urlsplit
 
-from headlong_web import codex_analysis, control, discovery, references, trajectory
+from headlong_web import (
+    codex_analysis,
+    control,
+    discovery,
+    references,
+    trajectory,
+    web_exploration,
+)
 from headlong_web.codex_bridge import (
     CURSOR_SCHEMA,
     CodexBridgeError,
@@ -206,12 +214,14 @@ class PersonalAssistant:
         identity: discovery.IdentityInfo,
         *,
         clock: Callable[[], datetime] | None = None,
+        monotonic: Callable[[], float] | None = None,
     ):
         self.root = root.resolve()
         self.identity = identity
         self.state_dir = identity.path / "assistant"
         self.registrations_file = self.state_dir / "registrations.json"
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._monotonic = monotonic or time.monotonic
 
     def projects(self) -> list[RegisteredProject]:
         data = self._read_registrations()
@@ -506,6 +516,180 @@ class PersonalAssistant:
                 result["saved" if created else "duplicate"] += 1
                 self._record_web_success(source, attempted_at, document.digest, result)
         return result
+
+    def explore_web_once(
+        self,
+        memory_selector: str,
+        *,
+        trigger_kind: str = "interest",
+        limits: web_exploration.ExplorationLimits | None = None,
+        seed_urls: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
+        """Explore from one authorized memory or candidate under hard limits."""
+        trigger = self._resolve_exploration_trigger(memory_selector, trigger_kind)
+        budget = limits or web_exploration.ExplorationLimits()
+        try:
+            known_records = references.list_references(self.identity.path)
+            known_records.extend(references.list_rejections(self.identity.path))
+        except references.ReferenceError as exc:
+            raise AssistantError(str(exc)) from exc
+        known_digests = {item["content_digest"] for item in known_records}
+
+        def visit(
+            url: str,
+            _depth: int,
+            search: bool,
+            remaining_bytes: int,
+            deadline: float,
+        ) -> web_exploration.VisitOutcome:
+            try:
+                document = references.fetch_public_document(
+                    url, monotonic=self._monotonic
+                )
+            except references.ReferenceError as exc:
+                return web_exploration.VisitOutcome(
+                    fetched=False,
+                    failure={"url": url, "phase": "fetch", "code": exc.code},
+                )
+            if self._monotonic() >= deadline:
+                return web_exploration.VisitOutcome(
+                    links=document.links, stop_reason="elapsed_time"
+                )
+            if search:
+                return web_exploration.VisitOutcome(links=document.links)
+            if document.digest in known_digests:
+                return web_exploration.VisitOutcome(
+                    links=document.links, duplicate_content=1
+                )
+            source = RegisteredWebSource(
+                references.source_id(document.source_url),
+                parse_web_source_name(document.source_url),
+                document.source_url,
+                "discovered",
+            )
+            try:
+                selection = self._select_reference(source, document)
+            except AssistantError:
+                return web_exploration.VisitOutcome(
+                    links=document.links,
+                    failure={
+                        "url": url,
+                        "phase": "selection",
+                        "code": "selection_failed",
+                    },
+                )
+            if self._monotonic() >= deadline:
+                return web_exploration.VisitOutcome(
+                    links=document.links,
+                    selected=1 if selection["selected"] else 0,
+                    stop_reason="elapsed_time",
+                )
+            attempted_at = codex_analysis.format_time(self._now())
+            if not selection["selected"]:
+                try:
+                    metadata, _created = references.store_rejection(
+                        self.identity.path,
+                        document,
+                        rejected_at=attempted_at,
+                        judgment=str(
+                            selection["summary"]
+                            or selection["title"]
+                            or "not selected during bounded exploration"
+                        ),
+                    )
+                    event = reference_rejection_event(metadata)
+                    if not self._ledger_has(event["event_id"]):
+                        self._append_event(event)
+                except (references.ReferenceError, AssistantError):
+                    return web_exploration.VisitOutcome(
+                        links=document.links,
+                        failure={
+                            "url": url,
+                            "phase": "storage",
+                            "code": "storage_failed",
+                        },
+                    )
+                known_digests.add(document.digest)
+                return web_exploration.VisitOutcome(
+                    links=document.links, not_selected=1
+                )
+            body_bytes = len(document.text.encode("utf-8"))
+            if body_bytes > remaining_bytes:
+                return web_exploration.VisitOutcome(
+                    links=document.links, selected=1, stop_reason="stored_bytes"
+                )
+            try:
+                metadata, created = references.store_reference(
+                    self.identity.path,
+                    document,
+                    fetched_at=attempted_at,
+                    title=str(selection["title"]),
+                    summary=str(selection["summary"]),
+                )
+                event = reference_revision_event(metadata)
+                if not self._ledger_has(event["event_id"]):
+                    self._append_event(event)
+            except (references.ReferenceError, AssistantError):
+                return web_exploration.VisitOutcome(
+                    links=document.links,
+                    failure={
+                        "url": url,
+                        "phase": "storage",
+                        "code": "storage_failed",
+                    },
+                )
+            known_digests.add(document.digest)
+            return web_exploration.VisitOutcome(
+                links=document.links,
+                selected=1,
+                saved=1 if created else 0,
+                duplicate_content=0 if created else 1,
+                stored_bytes=body_bytes if created else 0,
+            )
+
+        with self._state_lock():
+            result = web_exploration.run_bounded_exploration(
+                str(trigger["content"]),
+                limits=budget,
+                visit=visit,
+                monotonic=self._monotonic,
+                seed_urls=seed_urls,
+            )
+        result["trigger"] = {
+            "source": trigger["source"],
+            "kind": trigger_kind,
+            "event_id": trigger["event_id"],
+        }
+        result["registered_sources_added"] = 0
+        return result
+
+    def _resolve_exploration_trigger(
+        self, selector: str, trigger_kind: str
+    ) -> dict[str, Any]:
+        if trigger_kind not in {"interest", "open_loop"}:
+            raise AssistantError("exploration trigger must be an interest or open_loop")
+        method_name = "active_memories" if trigger_kind == "interest" else "memory_candidates"
+        provider = getattr(self, method_name, None)
+        if provider is None:
+            raise AssistantError(f"{trigger_kind} trigger source is not available")
+        records = provider()
+        matches = [
+            item
+            for item in records
+            if selector in {item.get("event_id"), item.get("memory_key")}
+        ]
+        if len(matches) != 1:
+            message = "not found" if not matches else "ambiguous"
+            raise AssistantError(f"exploration trigger {message}: {selector}")
+        record = matches[0]
+        content = record.get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise AssistantError("exploration trigger has no usable content")
+        return {
+            "source": "active_memory" if trigger_kind == "interest" else "memory_candidate",
+            "event_id": str(record["event_id"]),
+            "content": content.strip(),
+        }
 
     def web_source_health(self) -> list[dict[str, Any]]:
         try:
