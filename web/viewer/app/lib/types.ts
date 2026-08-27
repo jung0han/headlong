@@ -263,6 +263,37 @@ export interface ArchiveCandidate {
   created_at: string | null;
   review_event_id: string | null;
   reviewed_at: string | null;
+  execution_state:
+    | "not_requested"
+    | "succeeded"
+    | "already_done"
+    | "failed"
+    | "timeout"
+    | "unsupported"
+    | "indeterminate";
+  execution_attempts: number;
+  execution_error: { code: string; message: string } | null;
+  last_execution_at: string | null;
+}
+
+export interface ArchiveExecution {
+  session_id: string;
+  operation: "archive" | "unarchive";
+  authorization_event_id: string;
+  authorization_kind: "direct" | "candidate_acceptance";
+  candidate_id: string | null;
+  attempt_id: string;
+  attempt_number: number;
+  execution_state:
+    | "succeeded"
+    | "already_done"
+    | "failed"
+    | "timeout"
+    | "unsupported"
+    | "indeterminate";
+  execution_error: { code: string; message: string } | null;
+  attempted_at: string | null;
+  completed_at: string | null;
 }
 
 export interface ArchiveCandidateEvidence {

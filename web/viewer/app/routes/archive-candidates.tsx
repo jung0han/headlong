@@ -19,6 +19,8 @@ import {
   fetchIdentityStatus,
   pollWhileLive,
   reviewArchiveCandidate,
+  retryArchiveCandidate,
+  executeCodexArchive,
 } from "~/lib/api";
 import type { ProposalReviewState } from "~/lib/types";
 import { cn } from "~/lib/utils";
@@ -39,6 +41,9 @@ export default function ArchiveCandidatesPage() {
   const [selected, setSelected] = useState<string | null>(null);
   const [evidenceIndex, setEvidenceIndex] = useState<number | null>(null);
   const [reviewError, setReviewError] = useState<string | null>(null);
+  const [directSessionId, setDirectSessionId] = useState("");
+  const [executionMessage, setExecutionMessage] = useState<string | null>(null);
+  const [executionError, setExecutionError] = useState<string | null>(null);
   const queryClient = useQueryClient();
   const { data: status } = useQuery({
     queryKey: ["status", identityId],
@@ -82,6 +87,44 @@ export default function ArchiveCandidatesPage() {
     },
     onError: (error) => setReviewError(error.message),
   });
+  const retry = useMutation({
+    mutationFn: () => retryArchiveCandidate(identityId, active as string),
+    onMutate: () => setReviewError(null),
+    onSuccess: (updated) => {
+      queryClient.setQueryData(["archive-candidate", identityId, active], updated);
+      void queryClient.invalidateQueries({ queryKey: ["archive-candidates", identityId] });
+    },
+    onError: (error) => setReviewError(error.message),
+  });
+  const sessionControl = useMutation({
+    mutationFn: ({
+      sessionId,
+      operation,
+    }: {
+      sessionId: string;
+      operation: "archive" | "unarchive";
+    }) => executeCodexArchive(identityId, sessionId, operation),
+    onMutate: () => {
+      setReviewError(null);
+      setExecutionMessage(null);
+      setExecutionError(null);
+    },
+    onSuccess: (result) => {
+      setExecutionMessage(`${result.operation}: ${result.execution_state}`);
+      if (result.execution_error) {
+        setExecutionError(
+          `${result.execution_error.message} (${result.execution_error.code})`
+        );
+      }
+      void queryClient.invalidateQueries({ queryKey: ["archive-candidates", identityId] });
+      if (active) {
+        void queryClient.invalidateQueries({
+          queryKey: ["archive-candidate", identityId, active],
+        });
+      }
+    },
+    onError: (error) => setExecutionError(error.message),
+  });
 
   useEffect(() => {
     setEvidenceIndex(null);
@@ -103,6 +146,38 @@ export default function ArchiveCandidatesPage() {
         live={live}
         active="archive-candidates"
       />
+      <section className="mb-4 rounded-lg border bg-card p-4">
+        <h2 className="text-sm font-semibold">Direct Archive Directive</h2>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Authorize Codex archival for one stable session UUID without creating a candidate.
+        </p>
+        <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+          <input
+            value={directSessionId}
+            onChange={(event) => setDirectSessionId(event.target.value)}
+            placeholder="Codex Session UUID"
+            className="min-w-0 flex-1 rounded-md border bg-background px-3 py-2 font-mono text-xs"
+          />
+          <Button
+            type="button"
+            disabled={!directSessionId.trim() || sessionControl.isPending}
+            onClick={() =>
+              sessionControl.mutate({
+                sessionId: directSessionId.trim(),
+                operation: "archive",
+              })
+            }
+          >
+            Archive session
+          </Button>
+        </div>
+        {executionMessage && (
+          <p className="mt-2 text-xs text-muted-foreground">{executionMessage}</p>
+        )}
+        {executionError && (
+          <p className="mt-2 text-sm text-destructive">{executionError}</p>
+        )}
+      </section>
       {!candidates?.length ? (
         <Empty>
           <EmptyHeader>
@@ -156,6 +231,7 @@ export default function ArchiveCandidatesPage() {
                     <Badge variant="secondary">Archive Candidate</Badge>
                     <Badge variant="outline">{candidate.analysis_state}</Badge>
                     <Badge variant="secondary">{candidate.review_state}</Badge>
+                    <Badge variant="outline">execution: {candidate.execution_state}</Badge>
                   </div>
                   <h2 className="text-lg font-semibold">Completed work claim</h2>
                   <p className="mt-2 text-sm leading-relaxed">
@@ -185,9 +261,58 @@ export default function ArchiveCandidatesPage() {
                     ))}
                   </div>
                   <p className="mt-2 text-xs text-muted-foreground">
-                    Acceptance records your authority for a later execution slice. This
-                    screen does not archive or edit the Codex Session.
+                    Acceptance records your authority and invokes only Codex&apos;s archive
+                    interface. Headlong never edits the session file.
                   </p>
+                  <div className="mt-4 rounded-md border bg-muted/30 p-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-semibold">Execution</span>
+                      <Badge variant="outline">{candidate.execution_state}</Badge>
+                      <span className="text-xs text-muted-foreground">
+                        {candidate.execution_attempts} attempt
+                        {candidate.execution_attempts === 1 ? "" : "s"}
+                      </span>
+                    </div>
+                    {candidate.execution_error && (
+                      <p className="mt-2 text-sm text-destructive">
+                        {candidate.execution_error.message} ({candidate.execution_error.code})
+                      </p>
+                    )}
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {candidate.review_state === "accepted" &&
+                        ["failed", "timeout", "unsupported", "indeterminate"].includes(
+                          candidate.execution_state
+                        ) && (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            disabled={retry.isPending}
+                            onClick={() => retry.mutate()}
+                          >
+                            Retry archive
+                          </Button>
+                        )}
+                      {["succeeded", "already_done"].includes(
+                        candidate.execution_state
+                      ) && (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          disabled={sessionControl.isPending}
+                          onClick={() =>
+                            sessionControl.mutate({
+                              sessionId: candidate.session_id,
+                              operation: "unarchive",
+                            })
+                          }
+                        >
+                          Unarchive session
+                        </Button>
+                      )}
+                    </div>
+                  </div>
                   {reviewError && (
                     <p className="mt-2 text-sm text-destructive">{reviewError}</p>
                   )}

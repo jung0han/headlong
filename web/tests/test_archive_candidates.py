@@ -12,11 +12,15 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from headlong_web import archive_candidates, assistant_services, codex_analysis
+from headlong_web import (
+    archive_candidates,
+    archive_execution,
+    assistant_services,
+    codex_analysis,
+)
 from headlong_web.assistant import PersonalAssistant, resolve_observer
 from headlong_web.assistant_cli import run
 from headlong_web.server import create_app
-
 
 LOCATOR_TOKEN = "locator-1"
 LOCATOR = {
@@ -249,7 +253,7 @@ def _configure_model(monkeypatch, model: FakeLiteLLM, tmp_path: Path) -> None:
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
 
 
-def test_public_analysis_dashboard_and_cli_review_are_idempotent_and_non_executing(
+def test_public_analysis_dashboard_and_cli_review_are_idempotent_and_session_safe(
     tmp_path: Path, monkeypatch, capsys
 ):
     root = tmp_path / "headlong"
@@ -265,7 +269,10 @@ def test_public_analysis_dashboard_and_cli_review_are_idempotent_and_non_executi
     archived.mkdir(parents=True)
     session = archived / "session.jsonl"
     original_session = _row(
-        {"type": "session_meta", "payload": {"id": LOCATOR["source_identity"], "cwd": str(project)}}
+        {
+            "type": "session_meta",
+            "payload": {"id": LOCATOR["source_identity"], "cwd": str(project)},
+        }
     ) + _row({"type": "event_msg", "payload": {"type": "task_complete"}})
     session.write_bytes(original_session)
     subprocess_calls: list[object] = []
@@ -277,10 +284,20 @@ def test_public_analysis_dashboard_and_cli_review_are_idempotent_and_non_executi
 
     monkeypatch.setattr(assistant_services.subprocess, "run", record_subprocess)
 
+    class FakeArchiveAdapter:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, operation, session_id):
+            self.calls.append((operation, session_id))
+            return archive_execution.AdapterResult("succeeded")
+
+    archive_adapter = FakeArchiveAdapter()
     assistant = PersonalAssistant(
         root,
         resolve_observer(root, "observer"),
         clock=lambda: datetime(2026, 8, 27, tzinfo=timezone.utc),
+        archive_adapter=archive_adapter,
     )
     assistant.add_project(project)
     with FakeLiteLLM() as model:
@@ -307,50 +324,64 @@ def test_public_analysis_dashboard_and_cli_review_are_idempotent_and_non_executi
     assistant.review_archive_candidates([first_id], "rejected")
     assert len(journal.read_text().splitlines()) == after_reject
 
-    assert run(
-        [
-            "--root",
-            str(root),
-            "--identity",
-            "observer",
-            "archive-candidate",
-            "list",
-        ]
-    ) == 0
+    assert (
+        run(
+            [
+                "--root",
+                str(root),
+                "--identity",
+                "observer",
+                "archive-candidate",
+                "list",
+            ],
+            archive_adapter=archive_adapter,
+        )
+        == 0
+    )
     listed = json.loads(capsys.readouterr().out)
     assert len(listed["archive_candidates"]) == 2
-    assert run(
-        [
-            "--root",
-            str(root),
-            "--identity",
-            "observer",
-            "archive-candidate",
-            "show",
-            first_id,
-        ]
-    ) == 0
+    assert (
+        run(
+            [
+                "--root",
+                str(root),
+                "--identity",
+                "observer",
+                "archive-candidate",
+                "show",
+                first_id,
+            ],
+            archive_adapter=archive_adapter,
+        )
+        == 0
+    )
     assert json.loads(capsys.readouterr().out)["candidate_id"] == first_id
-    assert run(
-        [
-            "--root",
-            str(root),
-            "--identity",
-            "observer",
-            "archive-candidate",
-            "review",
-            first_id,
-            second_id,
-            "--state",
-            "accepted",
-        ]
-    ) == 0
+    assert (
+        run(
+            [
+                "--root",
+                str(root),
+                "--identity",
+                "observer",
+                "archive-candidate",
+                "review",
+                first_id,
+                second_id,
+                "--state",
+                "accepted",
+            ],
+            archive_adapter=archive_adapter,
+        )
+        == 0
+    )
     reviewed = json.loads(capsys.readouterr().out)
-    assert {item["review_state"] for item in reviewed["archive_candidates"]} == {
-        "accepted"
+    assert {item["review_state"] for item in reviewed["archive_candidates"]} == {"accepted"}
+    assert {item["execution_state"] for item in reviewed["archive_candidates"]} == {
+        "succeeded",
+        "already_done",
     }
 
-    client = TestClient(create_app(root))
+    client = TestClient(create_app(root, archive_adapter=archive_adapter))
     base = "/api/identities/.identities~observer/archive-candidates"
     response = client.get(base)
     assert response.status_code == 200
@@ -361,9 +392,7 @@ def test_public_analysis_dashboard_and_cli_review_are_idempotent_and_non_executi
     evidence = client.get(f"{base}/{first_id}/evidence/0")
     assert evidence.status_code == 200
     assert evidence.json()["raw"].encode() in original_session.splitlines(keepends=True)
-    individual = client.post(
-        f"{base}/{first_id}/review", json={"state": "dismissed"}
-    )
+    individual = client.post(f"{base}/{first_id}/review", json={"state": "dismissed"})
     assert individual.status_code == 200
     assert individual.json()["review_state"] == "dismissed"
     api_batch = client.post(
@@ -372,7 +401,7 @@ def test_public_analysis_dashboard_and_cli_review_are_idempotent_and_non_executi
     )
     assert api_batch.status_code == 200
     after_batch = len(journal.read_text().splitlines())
-    assert after_batch == before_review + 5
+    assert after_batch == before_review + 11
     api_replay = client.post(
         f"{base}/review",
         json={"candidate_ids": [first_id, second_id], "state": "accepted"},
@@ -380,18 +409,15 @@ def test_public_analysis_dashboard_and_cli_review_are_idempotent_and_non_executi
     assert api_replay.status_code == 200
     assert len(journal.read_text().splitlines()) == after_batch
 
-    read_only = TestClient(create_app(root, read_only=True))
-    blocked = read_only.post(
-        f"{base}/{first_id}/review", json={"state": "accepted"}
-    )
+    read_only = TestClient(create_app(root, read_only=True, archive_adapter=archive_adapter))
+    blocked = read_only.post(f"{base}/{first_id}/review", json={"state": "accepted"})
     assert blocked.status_code == 403
 
     assert session.read_bytes() == original_session
     assert canary.read_text() == "must stay unchanged\n"
     assert sorted(path.name for path in project.iterdir()) == ["work.txt"]
     assert not any(
-        isinstance(command, (list, tuple))
-        and command
-        and Path(str(command[0])).name == "codex"
+        isinstance(command, (list, tuple)) and command and Path(str(command[0])).name == "codex"
         for command in subprocess_calls
     )
+    assert archive_adapter.calls == [("archive", LOCATOR["source_identity"])]

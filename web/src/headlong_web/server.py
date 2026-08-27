@@ -24,6 +24,7 @@ from starlette.background import BackgroundTask
 
 from headlong_web import (
     activity,
+    archive_execution,
     assistant,
     assistant_runtime,
     chat,
@@ -207,7 +208,11 @@ class ActiveMemoryBody(BaseModel):
 
 
 def create_app(
-    root: Path, static_dir: Path | None = None, *, read_only: bool = False
+    root: Path,
+    static_dir: Path | None = None,
+    *,
+    read_only: bool = False,
+    archive_adapter: archive_execution.ArchiveAdapter | None = None,
 ) -> FastAPI:
     root = root.resolve()
     app = FastAPI(title="Headlong dash", version=VERSION)
@@ -229,6 +234,11 @@ def create_app(
     def _require_controls() -> None:
         if read_only:
             raise HTTPException(status_code=403, detail="Server is read-only")
+
+    def _archive_assistant(identity: discovery.IdentityInfo) -> assistant.PersonalAssistant:
+        return assistant.PersonalAssistant(
+            root, identity, archive_adapter=archive_adapter
+        )
 
     def _checked_thinker_names(identity: discovery.IdentityInfo, names: list[str]) -> None:
         enabled = {d.name for d in thinkers.list_thinker_dirs(identity.path)}
@@ -711,7 +721,7 @@ def create_app(
     def identity_archive_candidates(identity_id: str) -> list[dict]:
         identity = _identity_or_404(root, identity_id)
         try:
-            return assistant.PersonalAssistant(root, identity).archive_candidates()
+            return _archive_assistant(identity).archive_candidates()
         except assistant.AssistantError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -722,7 +732,7 @@ def create_app(
         _require_controls()
         identity = _identity_or_404(root, identity_id)
         try:
-            return assistant.PersonalAssistant(root, identity).review_archive_candidates(
+            return _archive_assistant(identity).review_archive_candidates(
                 body.candidate_ids, body.state
             )
         except assistant.AssistantError as exc:
@@ -733,7 +743,7 @@ def create_app(
     def identity_archive_candidate(identity_id: str, candidate_id: str) -> dict:
         identity = _identity_or_404(root, identity_id)
         try:
-            result = assistant.PersonalAssistant(root, identity).archive_candidate(
+            result = _archive_assistant(identity).archive_candidate(
                 candidate_id
             )
         except assistant.AssistantError as exc:
@@ -751,12 +761,40 @@ def create_app(
         _require_controls()
         identity = _identity_or_404(root, identity_id)
         try:
-            return assistant.PersonalAssistant(root, identity).review_archive_candidates(
+            return _archive_assistant(identity).review_archive_candidates(
                 [candidate_id], body.state
             )["archive_candidates"][0]
         except assistant.AssistantError as exc:
             status = 404 if "not found" in str(exc) else 422
             raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/identities/{identity_id}/archive-candidates/{candidate_id}/retry"
+    )
+    def identity_archive_candidate_retry(identity_id: str, candidate_id: str) -> dict:
+        _require_controls()
+        identity = _identity_or_404(root, identity_id)
+        try:
+            return _archive_assistant(identity).retry_archive_candidate(candidate_id)
+        except assistant.AssistantError as exc:
+            status = 404 if "not found" in str(exc) else 422
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/identities/{identity_id}/codex-sessions/{session_id}/{operation}"
+    )
+    def identity_codex_archive_operation(
+        identity_id: str, session_id: str, operation: Literal["archive", "unarchive"]
+    ) -> dict:
+        _require_controls()
+        identity = _identity_or_404(root, identity_id)
+        service = _archive_assistant(identity)
+        try:
+            if operation == "archive":
+                return service.archive_codex_session(session_id)
+            return service.unarchive_codex_session(session_id)
+        except assistant.AssistantError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.get(
         "/api/identities/{identity_id}/archive-candidates/{candidate_id}/evidence/{index}"
@@ -765,7 +803,7 @@ def create_app(
         identity_id: str, candidate_id: str, index: int
     ) -> dict:
         identity = _identity_or_404(root, identity_id)
-        service = assistant.PersonalAssistant(root, identity)
+        service = _archive_assistant(identity)
         try:
             candidate = service.archive_candidate(candidate_id)
             if candidate is None:

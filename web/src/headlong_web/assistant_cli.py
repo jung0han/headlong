@@ -8,7 +8,7 @@ import os
 import sys
 from pathlib import Path
 
-from headlong_web import assistant_runtime, web_exploration
+from headlong_web import archive_execution, assistant_runtime, web_exploration
 from headlong_web.assistant import (
     AssistantError,
     EvidenceLocator,
@@ -113,6 +113,18 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
     )
 
+    archive_session = commands.add_parser(
+        "archive-session", help="execute authorized Codex archive recovery controls"
+    )
+    archive_session_commands = archive_session.add_subparsers(
+        dest="archive_session_command", required=True
+    )
+    for operation in ("archive", "unarchive"):
+        command = archive_session_commands.add_parser(operation)
+        command.add_argument("session_id")
+    retry = archive_session_commands.add_parser("retry-candidate")
+    retry.add_argument("candidate_id")
+
     context = commands.add_parser(
         "context", help="assemble scoped Active Memory and Reference context"
     )
@@ -196,12 +208,16 @@ def _memory_authority_args(parser: argparse.ArgumentParser) -> None:
     _memory_scope_args(parser)
 
 
-def run(argv: list[str] | None = None) -> int:
+def run(
+    argv: list[str] | None = None,
+    *,
+    archive_adapter: archive_execution.ArchiveAdapter | None = None,
+) -> int:
     args = build_parser().parse_args(argv)
     try:
         root = args.root.resolve()
         identity = resolve_observer(root, args.identity)
-        assistant = PersonalAssistant(root, identity)
+        assistant = PersonalAssistant(root, identity, archive_adapter=archive_adapter)
         if args.command == "project":
             if args.project_command == "add":
                 result = assistant.add_project(args.path, args.name).to_dict()
@@ -301,6 +317,13 @@ def run(argv: list[str] | None = None) -> int:
                 result = assistant.review_archive_candidates(
                     args.candidate_ids, args.state
                 )
+        elif args.command == "archive-session":
+            if args.archive_session_command == "archive":
+                result = assistant.archive_codex_session(args.session_id)
+            elif args.archive_session_command == "unarchive":
+                result = assistant.unarchive_codex_session(args.session_id)
+            else:
+                result = assistant.retry_archive_candidate(args.candidate_id)
         elif args.command == "context":
             result = assistant.response_context(
                 args.query, args.project, current_path=Path.cwd()
