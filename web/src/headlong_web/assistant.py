@@ -1119,7 +1119,10 @@ class PersonalAssistant:
                         f"{downstream_reference_id}"
                     )
                 downstream = matches[0]
-                if events.index(downstream) <= events.index(target):
+                if (
+                    downstream.get("type") != "action"
+                    and events.index(downstream) <= events.index(target)
+                ):
                     raise AssistantError(
                         "Downstream proposal or action must follow the Active Memory"
                     )
