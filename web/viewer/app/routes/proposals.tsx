@@ -89,10 +89,9 @@ export default function ProposalsPage() {
       {!proposals?.length ? (
         <Empty>
           <EmptyHeader>
-            <EmptyTitle>No work proposals</EmptyTitle>
+            <EmptyTitle>No improvement proposals</EmptyTitle>
             <EmptyDescription>
-              Direct user corrections, test failures, tool failures, and reviewer
-              findings will appear here for review.
+              Evidence-backed work and Observer improvements will appear here for review.
             </EmptyDescription>
           </EmptyHeader>
         </Empty>
@@ -114,6 +113,7 @@ export default function ProposalsPage() {
                   )}
                 >
                   <span className="mb-1.5 flex flex-wrap items-center gap-2">
+                    <Badge variant="secondary">{item.proposal_type}</Badge>
                     <Badge variant="outline">{readable(item.evidence_kind)}</Badge>
                     <Badge variant={item.review_state === "pending" ? "secondary" : "default"}>
                       {item.review_state}
@@ -133,6 +133,7 @@ export default function ProposalsPage() {
               <>
                 <div className="border-b pb-4">
                   <div className="mb-2 flex flex-wrap items-center gap-2">
+                    <Badge variant="secondary">{proposal.proposal_label}</Badge>
                     <Badge variant="outline">{readable(proposal.evidence_kind)}</Badge>
                     <Badge variant="secondary">{proposal.review_state}</Badge>
                     <span className="font-mono text-[10px] text-muted-foreground">
@@ -168,6 +169,10 @@ export default function ProposalsPage() {
 
                 <section className="border-t pt-4">
                   <h3 className="mb-3 text-sm font-semibold">Evidence</h3>
+                  <p className="mb-3 text-xs text-muted-foreground">
+                    {proposal.task_root_ids.length} distinct Codex task root
+                    {proposal.task_root_ids.length === 1 ? "" : "s"}
+                  </p>
                   <div className="space-y-3">
                     {proposal.evidence_locators.map((locator) => (
                       <div

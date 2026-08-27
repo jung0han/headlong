@@ -207,6 +207,12 @@ export type DirectEvidenceKind =
   | "tool_failure"
   | "reviewer_finding";
 
+export type ProposalEvidenceKind =
+  | DirectEvidenceKind
+  | "observer_failure"
+  | "observer_regression"
+  | "inferred_pattern";
+
 export interface ProposalEvidenceLocator {
   schema: "headlong.evidence-locator/v1";
   kind: "codex_event";
@@ -220,16 +226,20 @@ export interface ProposalEvidenceLocator {
   host: string;
 }
 
-export interface WorkImprovementProposal {
+export interface ImprovementProposal {
   proposal_id: string;
-  proposal_type: "work";
+  proposal_type: "work" | "observer";
+  proposal_label: "Work Improvement Proposal" | "Observer Improvement Proposal";
   title: string;
   content: string;
   knowledge_scope: { kind: "project"; project_id: string };
-  evidence_kind: DirectEvidenceKind;
+  evidence_kind: ProposalEvidenceKind;
   evidence_locators: ProposalEvidenceLocator[];
-  source_identity: string;
-  source_analysis_event_id: string;
+  source_identity: string | null;
+  source_identities: string[];
+  task_root_ids: string[];
+  source_analysis_event_id: string | null;
+  source_analysis_event_ids: string[];
   review_state: ProposalReviewState;
   execution_authority: "none";
   created_at: string | null;

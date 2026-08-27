@@ -109,15 +109,21 @@ def _findings(
         "test_failure",
         "tool_failure",
         "reviewer_finding",
+        "observer_failure",
+        "observer_regression",
         "inferred_pattern",
         "open_loop",
     }
-    expected = {"kind", "content", "evidence_locators"} if signal else {
+    finding_fields = {"kind", "content", "evidence_locators"}
+    expected = finding_fields if signal else {
         "content",
         "evidence_locators",
     }
     for value in values:
-        if not isinstance(value, dict) or set(value) != expected:
+        if not isinstance(value, dict) or (
+            set(value) != expected
+            and (not signal or set(value) != finding_fields | {"proposal_type"})
+        ):
             raise AnalysisContractError("model analysis finding does not match the schema")
         item = {
             "content": _compact_text(value["content"], MAX_CONTENT, "analysis finding"),
@@ -131,6 +137,12 @@ def _findings(
                     "model analysis signal has an unsupported kind"
                 )
             item["kind"] = value["kind"]
+            proposal_type = value.get("proposal_type", "work")
+            if proposal_type not in {"work", "observer"}:
+                raise AnalysisContractError(
+                    "model analysis signal has an unsupported proposal type"
+                )
+            item["proposal_type"] = proposal_type
         output.append(item)
     return output
 

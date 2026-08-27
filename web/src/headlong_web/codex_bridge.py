@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterator
 from uuid import UUID
@@ -33,6 +33,8 @@ class CodexSource:
     relative_path: str
     device: int
     inode: int
+    parent_session_id: str | None
+    task_root_id: str
 
 
 def discover_sources(
@@ -56,6 +58,7 @@ def discover_sources(
                     continue
                 session_id = _canonical_uuid(meta["payload"]["id"])
                 cwd = Path(meta["payload"]["cwd"]).expanduser().resolve(strict=False)
+                parent_session_id = _parent_session_id(meta)
                 stat = path.stat()
             except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError):
                 continue
@@ -68,6 +71,8 @@ def discover_sources(
                     relative_path=path.relative_to(root).as_posix(),
                     device=stat.st_dev,
                     inode=stat.st_ino,
+                    parent_session_id=parent_session_id,
+                    task_root_id=session_id,
                 )
             )
 
@@ -80,7 +85,9 @@ def discover_sources(
         candidates = grouped[session_id]
         first = candidates[0]
         if any(
-            candidate.cwd != first.cwd or not _files_share_prefix(first.path, candidate.path)
+            candidate.cwd != first.cwd
+            or candidate.parent_session_id != first.parent_session_id
+            or not _files_share_prefix(first.path, candidate.path)
             for candidate in candidates[1:]
         ):
             errors.append(f"conflicting Codex Session identity: {session_id}")
@@ -98,7 +105,46 @@ def discover_sources(
             )
         except OSError:
             errors.append(f"Codex Session changed during discovery: {session_id}")
-    return selected, errors
+    resolved: list[CodexSource] = []
+    by_id = {source.id: source for source in selected}
+    for source in selected:
+        task_root_id, error = _task_root(source, by_id)
+        if error:
+            errors.append(error)
+            continue
+        resolved.append(replace(source, task_root_id=task_root_id))
+    return resolved, errors
+
+
+def _parent_session_id(meta: dict[str, Any]) -> str | None:
+    """Return the validated direct Codex task parent declared by session_meta."""
+    payload = meta["payload"]
+    parent = payload.get("parent_thread_id")
+    forked_from = payload.get("forked_from_id")
+    if parent is None and forked_from is None:
+        return None
+    canonical = _canonical_uuid(parent if parent is not None else forked_from)
+    if forked_from is not None and _canonical_uuid(forked_from) != canonical:
+        raise ValueError("Codex Session parent identities disagree")
+    return canonical
+
+
+def _task_root(
+    source: CodexSource, sources: dict[str, CodexSource]
+) -> tuple[str, str | None]:
+    """Follow validated parent links so subagents from one task count once."""
+    seen = {source.id}
+    current = source
+    while current.parent_session_id is not None:
+        parent_id = current.parent_session_id
+        if parent_id in seen:
+            return source.id, f"cyclic Codex Session ancestry: {source.id}"
+        seen.add(parent_id)
+        parent = sources.get(parent_id)
+        if parent is None:
+            return parent_id, None
+        current = parent
+    return current.id, None
 
 
 def resume_position(
