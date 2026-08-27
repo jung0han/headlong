@@ -17,7 +17,9 @@ tools live in [bin/](../bin/).
   Consolidation records. `web-source add/list/remove/health`, `observe-web`,
   and `reference list/show` manage bounded public sources and their immutable
   saved revisions. Pass `web-source add --kind url|rss|documentation` to
-  classify every recurring source while keeping one refresh boundary.
+  classify every recurring source while keeping one refresh boundary, or use
+  `--kind hacker_news` with `https://news.ycombinator.com/` to collect a bounded
+  top-story slice through the same selection, health, and revision boundaries.
   `explore-web MEMORY --trigger-kind interest|open_loop` performs a one-time
   public search/follow run from an authorized memory record. Its page, link
   depth, elapsed-time, and stored-byte limits are deterministic; discovered

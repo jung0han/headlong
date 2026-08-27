@@ -33,6 +33,7 @@ _CHUNK_BYTES = 64 * 1024
 _SOURCE_ID_RE = re.compile(r"^web-[0-9a-f]{20}$")
 _REVISION_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 _SUPPORTED_MEDIA_TYPES = {
+    "application/json",
     "text/html",
     "text/plain",
     "application/xhtml+xml",
@@ -41,6 +42,7 @@ _SUPPORTED_MEDIA_TYPES = {
     "application/xml",
     "text/xml",
 }
+_MARKUP_MEDIA_TYPES = _SUPPORTED_MEDIA_TYPES - {"application/json", "text/plain"}
 
 
 class ReferenceError(RuntimeError):
@@ -265,7 +267,8 @@ def fetch_public_document(
             url,
             headers={
                 "Accept": (
-                    "text/html, text/plain;q=0.9, application/rss+xml;q=0.9, "
+                    "text/html, text/plain;q=0.9, application/json;q=0.9, "
+                    "application/rss+xml;q=0.9, "
                     "application/atom+xml;q=0.9, application/xml;q=0.8, "
                     "application/xhtml+xml;q=0.8"
                 ),
@@ -497,12 +500,14 @@ def extract_public_links(text: str, media_type: str, base_url: str) -> tuple[str
 
 
 def sanitize_document(text: str, media_type: str) -> str:
-    if media_type in _SUPPORTED_MEDIA_TYPES - {"text/plain"}:
+    if media_type in _MARKUP_MEDIA_TYPES:
         parser = _TextExtractor()
         parser.feed(text)
         parser.close()
         text = "".join(parser.parts)
     text = "".join(char for char in text if char in "\n\t" or char.isprintable())
+    if media_type == "application/json":
+        return text.strip()
     lines = [" ".join(line.split()) for line in text.splitlines()]
     compact: list[str] = []
     for line in lines:
