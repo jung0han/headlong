@@ -18,10 +18,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 from urllib.parse import urlsplit
 
-from headlong_web import control, discovery, references, trajectory
+from headlong_web import codex_analysis, control, discovery, references, trajectory
 from headlong_web.codex_bridge import (
     CURSOR_SCHEMA,
     CodexBridgeError,
@@ -34,7 +34,8 @@ from headlong_web.codex_bridge import (
 REGISTRATION_SCHEMA = "headlong.assistant.registrations/v1"
 EVENT_SCHEMA = "headlong.activity-ledger/v1"
 LOCATOR_SCHEMA = "headlong.evidence-locator/v1"
-ANALYSIS_SCHEMA = "headlong.codex-observation/v1"
+ANALYSIS_SCHEMA = codex_analysis.ANALYSIS_SCHEMA
+ANALYSIS_STATE_SCHEMA = codex_analysis.ANALYSIS_STATE_SCHEMA
 WEB_SELECTION_SCHEMA = "headlong.web-reference-selection/v1"
 SOURCE_EVENT_SCHEMA = "headlong.codex-source-event/v1"
 WEB_SOURCE_KINDS = {"url", "rss", "documentation"}
@@ -199,11 +200,18 @@ def resolve_observer(root: Path, selector: str | None) -> discovery.IdentityInfo
 class PersonalAssistant:
     """Identity-local application boundary shared by CLI and dashboard."""
 
-    def __init__(self, root: Path, identity: discovery.IdentityInfo):
+    def __init__(
+        self,
+        root: Path,
+        identity: discovery.IdentityInfo,
+        *,
+        clock: Callable[[], datetime] | None = None,
+    ):
         self.root = root.resolve()
         self.identity = identity
         self.state_dir = identity.path / "assistant"
         self.registrations_file = self.state_dir / "registrations.json"
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     def projects(self) -> list[RegisteredProject]:
         data = self._read_registrations()
@@ -584,6 +592,7 @@ class PersonalAssistant:
             "recovered": 0,
             "status": "ok",
         }
+        observed_at = self._now()
         with self._state_lock():
             projects = self.projects()
             ledger_ids = self._ledger_event_ids()
@@ -637,7 +646,144 @@ class PersonalAssistant:
                     )
                 if source.path.stat().st_size > offset:
                     result["deferred"] += 1
-            self._write_source_health("codex", result)
+                current_cursor = self._read_codex_cursor(source.id)
+                if current_cursor is not None:
+                    self._sync_analysis_revision(
+                        project, source, current_cursor, observed_at
+                    )
+            self._write_source_health("codex", "collection", result)
+        return result
+
+    def process_codex_once(
+        self, active_root: Path, archived_root: Path
+    ) -> dict[str, dict[str, Any]]:
+        """Collect one durable source suffix, then run every due analysis."""
+        collection = self.follow_codex_once(active_root, archived_root)
+        analysis = self.analyze_codex_once(active_root, archived_root)
+        return {"collection": collection, "analysis": analysis}
+
+    def analyze_codex_once(
+        self, active_root: Path, archived_root: Path
+    ) -> dict[str, Any]:
+        """Run deterministic inactivity/archival analysis for collected revisions."""
+        roots = {"active": active_root.resolve(), "archived": archived_root.resolve()}
+        result: dict[str, Any] = {
+            "discovered": 0,
+            "eligible": 0,
+            "waiting": 0,
+            "provisional": 0,
+            "final": 0,
+            "duplicate": 0,
+            "failed": 0,
+            "errors": [],
+            "status": "ok",
+        }
+        now = self._now()
+        session_health: list[dict[str, Any]] = []
+        with self._state_lock():
+            projects = self.projects()
+            ledger_ids = self._ledger_event_ids()
+            sources, discovery_errors = discover_sources(roots)
+            result["discovered"] = len(sources) + len(discovery_errors)
+            result["errors"].extend(discovery_errors)
+            for source in sources:
+                project = _project_for_cwd(projects, source.cwd)
+                if project is None:
+                    continue
+                result["eligible"] += 1
+                cursor = self._read_codex_cursor(source.id)
+                if cursor is None:
+                    result["waiting"] += 1
+                    continue
+                state = self._sync_analysis_revision(project, source, cursor, now)
+                try:
+                    due_kind = codex_analysis.due_kind(
+                        state, source.source_root, now
+                    )
+                except codex_analysis.AnalysisContractError as exc:
+                    raise AssistantError(str(exc)) from exc
+                if due_kind is None:
+                    if state.get("status") in {"provisional", "final"}:
+                        result["duplicate"] += 1
+                    else:
+                        result["waiting"] += 1
+                    session_health.append(codex_analysis.health(state))
+                    continue
+                event_id = _analysis_event_id(
+                    project.id,
+                    source.id,
+                    state["source_revision_digest"],
+                    due_kind,
+                )
+                marker_key = f"{due_kind}_event_id"
+                if state.get(marker_key) or event_id in ledger_ids:
+                    state[marker_key] = event_id
+                    state["status"] = due_kind
+                    self._write_codex_analysis_state(source.id, state)
+                    result["duplicate"] += 1
+                    session_health.append(codex_analysis.health(state))
+                    continue
+                try:
+                    analysis = self._analyze_revision(source, cursor, due_kind)
+                except AssistantError:
+                    failed_id = _analysis_failure_id(
+                        project.id,
+                        source.id,
+                        state["source_revision_digest"],
+                        due_kind,
+                    )
+                    if failed_id not in ledger_ids:
+                        self._append_event(
+                            analysis_status_event(
+                                failed_id,
+                                project,
+                                source,
+                                state,
+                                "failed",
+                                due_kind,
+                                supersedes_event_ids=[],
+                            )
+                        )
+                        ledger_ids.add(failed_id)
+                    state["status"] = "failed"
+                    state["failed_analysis_kind"] = due_kind
+                    state["failure_event_id"] = failed_id
+                    state["last_error"] = "Codex Session analysis failed"
+                    state["last_attempt_at"] = codex_analysis.format_time(now)
+                    self._write_codex_analysis_state(source.id, state)
+                    result["failed"] += 1
+                    result["errors"].append(
+                        f"Codex Session analysis failed: {source.id} ({due_kind})"
+                    )
+                    session_health.append(codex_analysis.health(state))
+                    continue
+
+                supersedes = codex_analysis.supersedes(state, due_kind)
+                event = analysis_event(
+                    event_id,
+                    project,
+                    source,
+                    state,
+                    due_kind,
+                    analysis,
+                    supersedes,
+                )
+                self._append_event(event)
+                ledger_ids.add(event_id)
+                state[marker_key] = event_id
+                state["latest_success_event_id"] = event_id
+                state["status"] = due_kind
+                state["last_attempt_at"] = codex_analysis.format_time(now)
+                state["last_error"] = None
+                state["failure_event_id"] = None
+                self._write_codex_analysis_state(source.id, state)
+                result[due_kind] += 1
+                session_health.append(codex_analysis.health(state))
+
+            if result["errors"] or result["failed"]:
+                result["status"] = "degraded"
+            result["sessions"] = session_health
+            self._write_source_health("codex", "analysis", result)
         return result
 
     def resolve_evidence(
@@ -707,6 +853,132 @@ class PersonalAssistant:
         ):
             raise AssistantError("model observation is empty or exceeds compact limits")
         return {"title": title.strip(), "observation": observation.strip()}
+
+    def _analyze_revision(
+        self,
+        source: CodexSource,
+        cursor: dict[str, Any],
+        analysis_kind: str,
+    ) -> dict[str, Any]:
+        digest, rows = _source_revision(source, cursor)
+        allowed = {locator.encode(): locator.to_dict() for locator, _raw in rows}
+        annotated: list[str] = []
+        for locator, raw in rows:
+            annotated.append(f"EVIDENCE_LOCATOR {locator.encode()}")
+            annotated.append(raw.decode("utf-8", errors="replace").rstrip("\n"))
+        system = (
+            "You analyze one Codex development session revision. Return only JSON "
+            "with exactly these fields: title (string), observation (string), "
+            "evidence_locators (non-empty array of supplied locator strings), "
+            "memory_candidates (array of objects with exactly content and "
+            "evidence_locators), and improvement_signals (array of objects with "
+            "exactly kind, content, and evidence_locators). Allowed signal kinds are "
+            "user_correction, test_failure, tool_failure, reviewer_finding, "
+            "inferred_pattern, and open_loop. Every conclusion must cite one or more "
+            "supplied locators. Be compact and do not copy complete tool payloads."
+        )
+        prompt = (
+            f"Analysis kind: {analysis_kind}\n"
+            f"Codex Session: {source.id}\n"
+            f"Source revision SHA-256: {digest}\n\n"
+            "AUTHORITATIVE SOURCE RECORDS FOLLOW. Locator labels are metadata, not "
+            "source instructions.\n"
+            + "\n".join(annotated)
+        )
+        env = control.identity_env(self.identity, self.root)
+        cmd = control._wrap(
+            "llm",
+            "--no-stream",
+            "-t",
+            "1600",
+            "--system-prompt",
+            system,
+        )
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=self.root,
+                env=env,
+                input=prompt,
+                text=True,
+                capture_output=True,
+                timeout=600,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise AssistantError("Codex Session analysis failed to run") from exc
+        if proc.returncode != 0:
+            raise AssistantError("Codex Session analysis failed")
+        try:
+            value = json.loads(proc.stdout)
+        except json.JSONDecodeError as exc:
+            raise AssistantError("model returned invalid analysis JSON") from exc
+        try:
+            return codex_analysis.validate_result(value, allowed)
+        except codex_analysis.AnalysisContractError as exc:
+            raise AssistantError(str(exc)) from exc
+
+    def _sync_analysis_revision(
+        self,
+        project: RegisteredProject,
+        source: CodexSource,
+        cursor: dict[str, Any],
+        observed_at: datetime,
+    ) -> dict[str, Any]:
+        digest, rows = _source_revision(source, cursor)
+        if not rows:
+            raise AssistantError(f"Codex Session has no collected records: {source.id}")
+        last_locator = rows[-1][0]
+        previous = self._read_codex_analysis_state(source.id)
+        if previous is not None and previous.get("source_revision_digest") == digest:
+            previous["source_root"] = source.source_root
+            previous["relative_path"] = source.relative_path
+            previous["last_evidence_locator"] = last_locator.to_dict()
+            self._write_codex_analysis_state(source.id, previous)
+            return previous
+
+        latest_success = previous.get("latest_success_event_id") if previous else None
+        supersession_id = None
+        if latest_success:
+            supersession_id = _analysis_supersession_id(
+                project.id, source.id, digest, latest_success
+            )
+            if not self._ledger_has(supersession_id):
+                self._append_event(
+                    analysis_status_event(
+                        supersession_id,
+                        project,
+                        source,
+                        {
+                            "source_revision_digest": digest,
+                            "last_evidence_locator": last_locator.to_dict(),
+                        },
+                        "superseded",
+                        "revision_changed",
+                        supersedes_event_ids=[latest_success],
+                    )
+                )
+        state = {
+            "schema": ANALYSIS_STATE_SCHEMA,
+            "session_id": source.id,
+            "project_id": project.id,
+            "source_root": source.source_root,
+            "relative_path": source.relative_path,
+            "source_revision_digest": digest,
+            "source_byte_offset": int(cursor["byte_offset"]),
+            "last_evidence_locator": last_locator.to_dict(),
+            "last_activity_at": codex_analysis.format_time(observed_at),
+            "status": "waiting",
+            "provisional_event_id": None,
+            "final_event_id": None,
+            "failure_event_id": None,
+            "failed_analysis_kind": None,
+            "last_attempt_at": None,
+            "last_error": None,
+            "latest_success_event_id": latest_success,
+            "supersession_event_id": supersession_id,
+        }
+        self._write_codex_analysis_state(source.id, state)
+        return state
 
     def _select_reference(
         self, source: RegisteredWebSource, document: references.FetchedDocument
@@ -875,14 +1147,57 @@ class PersonalAssistant:
             self.state_dir / "cursors" / "codex" / f"{source.id}.json", value
         )
 
-    def _write_source_health(self, source: str, value: dict[str, Any]) -> None:
-        health = {
-            "schema": "headlong.source-health/v1",
-            "source": source,
-            "status": value["status"],
-            "errors": value["errors"],
-        }
+    def _read_codex_analysis_state(self, session_id: str) -> dict[str, Any] | None:
+        path = self.state_dir / "analysis" / "codex" / f"{session_id}.json"
+        try:
+            value = json.loads(path.read_text())
+        except FileNotFoundError:
+            return None
+        except (OSError, json.JSONDecodeError) as exc:
+            raise AssistantError(f"cannot read Codex analysis state: {session_id}") from exc
+        if (
+            not isinstance(value, dict)
+            or value.get("schema") != ANALYSIS_STATE_SCHEMA
+            or value.get("session_id") != session_id
+        ):
+            raise AssistantError(f"unsupported Codex analysis state: {session_id}")
+        return value
+
+    def _write_codex_analysis_state(
+        self, session_id: str, value: dict[str, Any]
+    ) -> None:
+        self._write_state_json(
+            self.state_dir / "analysis" / "codex" / f"{session_id}.json", value
+        )
+
+    def _write_source_health(
+        self, source: str, section: str, value: dict[str, Any]
+    ) -> None:
+        path = self.state_dir / "source-health" / f"{source}.json"
+        try:
+            health = json.loads(path.read_text())
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            health = {"schema": "headlong.source-health/v1", "source": source}
+        health[section] = value
+        sections = [
+            item
+            for key in ("collection", "analysis")
+            if isinstance((item := health.get(key)), dict)
+        ]
+        errors = [str(error) for item in sections for error in item.get("errors", [])]
+        health["status"] = (
+            "degraded"
+            if any(item.get("status") != "ok" for item in sections)
+            else "ok"
+        )
+        health["errors"] = errors
         self._write_state_json(self.state_dir / "source-health" / f"{source}.json", health)
+
+    def _now(self) -> datetime:
+        value = self._clock()
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise AssistantError("Personal Assistant clock must return an aware datetime")
+        return value.astimezone(timezone.utc)
 
     @staticmethod
     def _write_state_json(path: Path, value: dict[str, Any]) -> None:
@@ -939,6 +1254,84 @@ def observation_event(
         details={
             "analysis_kind": "completed_session",
             "analysis_schema": ANALYSIS_SCHEMA,
+        },
+    )
+
+
+def analysis_event(
+    event_id: str,
+    project: RegisteredProject,
+    source: CodexSource,
+    state: dict[str, Any],
+    analysis_kind: str,
+    analysis: dict[str, Any],
+    supersedes_event_ids: list[str],
+) -> dict[str, Any]:
+    """Build one validated, revision-specific analysis result."""
+    return activity_event(
+        event_type="observation",
+        event_id=event_id,
+        source_kind="codex_session",
+        source_identity=source.id,
+        knowledge_scope={"kind": "project", "project_id": project.id},
+        evidence_kind="model_inference",
+        verification="observed",
+        authority="candidate",
+        evidence_locators=analysis["evidence_locators"],
+        title=analysis["title"],
+        content=analysis["observation"],
+        supersedes_event_ids=supersedes_event_ids,
+        details={
+            "analysis_kind": analysis_kind,
+            "analysis_state": analysis_kind,
+            "analysis_schema": ANALYSIS_SCHEMA,
+            "source_revision_digest": state["source_revision_digest"],
+            "memory_candidates": analysis["memory_candidates"],
+            "improvement_signals": analysis["improvement_signals"],
+        },
+    )
+
+
+def analysis_status_event(
+    event_id: str,
+    project: RegisteredProject,
+    source: CodexSource,
+    state: dict[str, Any],
+    analysis_state: str,
+    analysis_kind: str,
+    *,
+    supersedes_event_ids: list[str],
+) -> dict[str, Any]:
+    """Record failed and superseded lifecycle states without source content."""
+    locator = EvidenceLocator.decode(state["last_evidence_locator"])
+    if analysis_state == "failed":
+        title = "Codex Session analysis failed"
+        content = "The analysis remains retryable; no success marker was recorded."
+        authority = "candidate"
+        verification = "unverified"
+    else:
+        title = "Codex Session analysis superseded"
+        content = "Later source activity superseded the prior analysis conclusion."
+        authority = "superseded"
+        verification = "stale"
+    return activity_event(
+        event_type="analysis-status",
+        event_id=event_id,
+        source_kind="codex_session",
+        source_identity=source.id,
+        knowledge_scope={"kind": "project", "project_id": project.id},
+        evidence_kind="observed_event",
+        verification=verification,
+        authority=authority,
+        evidence_locators=[locator.to_dict()],
+        title=title,
+        content=content,
+        supersedes_event_ids=supersedes_event_ids,
+        details={
+            "analysis_kind": analysis_kind,
+            "analysis_state": analysis_state,
+            "analysis_schema": ANALYSIS_SCHEMA,
+            "source_revision_digest": state["source_revision_digest"],
         },
     )
 
@@ -1276,6 +1669,97 @@ def _contained(path: Path, root: Path) -> bool:
 def _observation_id(project_id: str, locator: EvidenceLocator) -> str:
     key = f"{ANALYSIS_SCHEMA}:{project_id}:{locator.source_identity}:{locator.sha256}"
     return str(uuid.uuid5(_EVENT_NAMESPACE, key))
+
+
+def _analysis_event_id(
+    project_id: str,
+    session_id: str,
+    revision_digest: str,
+    analysis_kind: str,
+) -> str:
+    key = ":".join(
+        (ANALYSIS_SCHEMA, project_id, session_id, revision_digest, analysis_kind)
+    )
+    return str(uuid.uuid5(_EVENT_NAMESPACE, key))
+
+
+def _analysis_failure_id(
+    project_id: str,
+    session_id: str,
+    revision_digest: str,
+    analysis_kind: str,
+) -> str:
+    key = ":".join(
+        (
+            ANALYSIS_SCHEMA,
+            "failed",
+            project_id,
+            session_id,
+            revision_digest,
+            analysis_kind,
+        )
+    )
+    return str(uuid.uuid5(_EVENT_NAMESPACE, key))
+
+
+def _analysis_supersession_id(
+    project_id: str,
+    session_id: str,
+    revision_digest: str,
+    superseded_event_id: str,
+) -> str:
+    key = ":".join(
+        (
+            ANALYSIS_SCHEMA,
+            "superseded",
+            project_id,
+            session_id,
+            revision_digest,
+            superseded_event_id,
+        )
+    )
+    return str(uuid.uuid5(_EVENT_NAMESPACE, key))
+
+
+def _source_revision(
+    source: CodexSource, cursor: dict[str, Any]
+) -> tuple[str, list[tuple[EvidenceLocator, bytes]]]:
+    """Hash and address exactly the complete source prefix represented by a cursor."""
+    try:
+        limit = int(cursor["byte_offset"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise AssistantError(f"invalid Codex cursor for analysis: {source.id}") from exc
+    digest = hashlib.sha256()
+    rows: list[tuple[EvidenceLocator, bytes]] = []
+    consumed = 0
+    line = 0
+    try:
+        for offset, raw in complete_rows(source.path, 0):
+            if offset + len(raw) > limit:
+                break
+            line += 1
+            digest.update(raw)
+            consumed += len(raw)
+            rows.append(
+                (
+                    EvidenceLocator(
+                        source_identity=source.id,
+                        source_root=source.source_root,
+                        relative_path=source.relative_path,
+                        line=line,
+                        byte_offset=offset,
+                        byte_length=len(raw),
+                        sha256=hashlib.sha256(raw).hexdigest(),
+                        host=socket.gethostname(),
+                    ),
+                    raw,
+                )
+            )
+    except CodexBridgeError as exc:
+        raise AssistantError(str(exc)) from exc
+    if consumed != limit:
+        raise AssistantError(f"Codex cursor does not describe a complete prefix: {source.id}")
+    return digest.hexdigest(), rows
 
 
 def parse_web_source_name(url: str) -> str:

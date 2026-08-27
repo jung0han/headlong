@@ -12,11 +12,12 @@ tools live in [bin/](../bin/).
 - `headlong-assistant` registers projects and runs the proposal-only Personal
   Assistant source adapters. `project add/list/remove` is the public boundary
   for choosing which development work may be observed; `follow-codex` performs
-  one restart-safe incremental collection poll over configured Codex roots;
-  `web-source add/list/remove/health`, `observe-web`, and `reference list/show`
-  manage bounded public sources and their immutable saved revisions. Pass
-  `web-source add --kind url|rss|documentation` to classify every recurring
-  source while keeping one refresh boundary.
+  one restart-safe incremental collection poll over configured Codex roots,
+  while `process-codex` also emits due Provisional Analysis and Final
+  Consolidation records. `web-source add/list/remove/health`, `observe-web`,
+  and `reference list/show` manage bounded public sources and their immutable
+  saved revisions. Pass `web-source add --kind url|rss|documentation` to
+  classify every recurring source while keeping one refresh boundary.
 - `shellm-docker-broker` is the host-side policy server for brokered
   Docker. It is never present in the mind's environment.
 - `shellm-explore` visualizes run trees, `pr-committee` runs multi-model

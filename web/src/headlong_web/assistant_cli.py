@@ -59,6 +59,11 @@ def build_parser() -> argparse.ArgumentParser:
     follow = commands.add_parser("follow-codex", help="collect active Codex records once")
     _source_root_args(follow)
 
+    process = commands.add_parser(
+        "process-codex", help="collect Codex records and run due session analysis once"
+    )
+    _source_root_args(process)
+
     evidence = commands.add_parser("resolve-evidence", help="resolve a v1 Evidence Locator")
     evidence.add_argument("locator")
     _source_root_args(evidence)
@@ -116,6 +121,10 @@ def run(argv: list[str] | None = None) -> int:
                     raise AssistantError("Reference revision not found")
         elif args.command == "follow-codex":
             result = assistant.follow_codex_once(
+                args.sessions_root, args.archived_sessions_root
+            )
+        elif args.command == "process-codex":
+            result = assistant.process_codex_once(
                 args.sessions_root, args.archived_sessions_root
             )
         else:
