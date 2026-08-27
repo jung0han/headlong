@@ -22,6 +22,7 @@ from typing import Any, Callable, Iterator
 from urllib.parse import urlsplit
 
 from headlong_web import (
+    archive_candidates,
     active_memory,
     assistant_services,
     codex_analysis,
@@ -903,6 +904,32 @@ class PersonalAssistant:
             except assistant_services.AssistantServiceError as exc:
                 raise AssistantError(str(exc)) from exc
 
+    def archive_candidates(self) -> list[dict[str, Any]]:
+        """Return Archive Candidates rebuilt from the canonical ledger."""
+        try:
+            return self._governance.archive_candidates()
+        except assistant_services.AssistantServiceError as exc:
+            raise AssistantError(str(exc)) from exc
+
+    def archive_candidate(self, candidate_id: str) -> dict[str, Any] | None:
+        try:
+            return self._governance.archive_candidate(candidate_id)
+        except assistant_services.AssistantServiceError as exc:
+            raise AssistantError(str(exc)) from exc
+
+    def review_archive_candidates(
+        self, candidate_ids: list[str], state: str
+    ) -> dict[str, Any]:
+        """Append individual or batch review authority without execution."""
+        with self._state_lock():
+            try:
+                reviewed = self._governance.review_archive_candidates(
+                    candidate_ids, state
+                )
+            except assistant_services.AssistantServiceError as exc:
+                raise AssistantError(str(exc)) from exc
+        return {"archive_candidates": reviewed}
+
     def shadow_gate_report(self) -> dict[str, Any]:
         """Return the live, ledger-derived proposal-only evaluation report."""
         try:
@@ -1542,6 +1569,9 @@ class PersonalAssistant:
             result["work_proposals_created"] = self._sync_improvement_proposals(
                 ledger_ids
             )
+            result["archive_candidates_created"] = self._sync_archive_candidates(
+                ledger_ids
+            )
             result["sessions"] = session_health
             self._write_source_health("codex", "analysis", result)
         return result
@@ -1600,7 +1630,9 @@ class PersonalAssistant:
             "evidence_locators (non-empty array of supplied locator strings), "
             "memory_candidates (array of objects with exactly content and "
             "evidence_locators), and improvement_signals (array of objects with "
-            "exactly kind, proposal_type, content, and evidence_locators). "
+            "exactly kind, proposal_type, content, and evidence_locators), and "
+            "archive_candidates (array of objects with exactly completion_state, "
+            "rationale, and evidence_locators). completion_state must be completed. "
             "proposal_type is work or observer. Allowed signal kinds are "
             "user_correction, test_failure, tool_failure, reviewer_finding, "
             "observer_failure, observer_regression, inferred_pattern, and open_loop. "
@@ -1793,6 +1825,22 @@ class PersonalAssistant:
             if update is not None and update["event_id"] not in ledger_ids:
                 self._append_event(update)
                 ledger_ids.add(update["event_id"])
+                created += 1
+        return created
+
+    def _sync_archive_candidates(self, ledger_ids: set[str]) -> int:
+        """Materialize validated model completion claims idempotently."""
+        created = 0
+        for analysis in self._ledger_events():
+            try:
+                candidates = archive_candidates.candidate_events(analysis)
+            except archive_candidates.ArchiveCandidateError as exc:
+                raise AssistantError(str(exc)) from exc
+            for event in candidates:
+                if event["event_id"] in ledger_ids:
+                    continue
+                self._append_event(event)
+                ledger_ids.add(event["event_id"])
                 created += 1
         return created
 
@@ -2147,6 +2195,7 @@ def analysis_event(
             "analysis_completed_at": codex_analysis.format_time(completed_at),
             "memory_candidates": analysis["memory_candidates"],
             "improvement_signals": analysis["improvement_signals"],
+            "archive_candidates": analysis["archive_candidates"],
         },
     )
 

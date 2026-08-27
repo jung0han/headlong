@@ -61,6 +61,20 @@ def result_schema(allowed: dict[str, dict[str, Any]]) -> StructuredResultSchema:
         },
         "required": ["kind", "proposal_type", "content", "evidence_locators"],
     }
+    archive_candidate = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "completion_state": {"type": "string", "enum": ["completed"]},
+            "rationale": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": MAX_CONTENT,
+            },
+            "evidence_locators": locators,
+        },
+        "required": ["completion_state", "rationale", "evidence_locators"],
+    }
     document = {
         "type": "object",
         "additionalProperties": False,
@@ -82,6 +96,11 @@ def result_schema(allowed: dict[str, dict[str, Any]]) -> StructuredResultSchema:
                 "items": signal,
                 "maxItems": 20,
             },
+            "archive_candidates": {
+                "type": "array",
+                "items": archive_candidate,
+                "maxItems": 20,
+            },
         },
         "required": [
             "title",
@@ -89,6 +108,7 @@ def result_schema(allowed: dict[str, dict[str, Any]]) -> StructuredResultSchema:
             "evidence_locators",
             "memory_candidates",
             "improvement_signals",
+            "archive_candidates",
         ],
     }
     return StructuredResultSchema(
@@ -143,6 +163,7 @@ def validate_result(value: Any, allowed: dict[str, dict[str, Any]]) -> dict[str,
         "evidence_locators",
         "memory_candidates",
         "improvement_signals",
+        "archive_candidates",
     }
     if not isinstance(value, dict) or set(value) != expected:
         raise AnalysisContractError("model analysis does not match the required schema")
@@ -160,7 +181,36 @@ def validate_result(value: Any, allowed: dict[str, dict[str, Any]]) -> dict[str,
         "improvement_signals": _findings(
             value["improvement_signals"], allowed, signal=True
         ),
+        "archive_candidates": _archive_candidates(
+            value["archive_candidates"], allowed
+        ),
     }
+
+
+def _archive_candidates(
+    values: Any, allowed: dict[str, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    if not isinstance(values, list) or len(values) > 20:
+        raise AnalysisContractError("model Archive Candidates must be a bounded array")
+    output: list[dict[str, Any]] = []
+    expected = {"completion_state", "rationale", "evidence_locators"}
+    for value in values:
+        if not isinstance(value, dict) or set(value) != expected:
+            raise AnalysisContractError("model Archive Candidate does not match the schema")
+        if value["completion_state"] != "completed":
+            raise AnalysisContractError("model Archive Candidate has an unsupported claim")
+        output.append(
+            {
+                "completion_state": "completed",
+                "rationale": _compact_text(
+                    value["rationale"], MAX_CONTENT, "Archive Candidate rationale"
+                ),
+                "evidence_locators": _locators(
+                    value["evidence_locators"], allowed, "Archive Candidate"
+                ),
+            }
+        )
+    return output
 
 
 def due_kind(state: dict[str, Any], source_root: str, now: datetime) -> str | None:

@@ -172,6 +172,16 @@ class ProposalReviewBody(BaseModel):
     state: Literal["pending", "accepted", "rejected", "dismissed"]
 
 
+class ArchiveCandidateReviewBody(BaseModel):
+    state: Literal["pending", "accepted", "rejected", "dismissed"]
+
+    model_config = {"extra": "forbid"}
+
+
+class ArchiveCandidateBatchReviewBody(ArchiveCandidateReviewBody):
+    candidate_ids: list[str]
+
+
 class ObservationEvaluationBody(BaseModel):
     useful: bool
     accurate: bool
@@ -676,6 +686,89 @@ def create_app(
             return assistant.PersonalAssistant(root, identity).proposals()
         except assistant.AssistantError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.get("/api/identities/{identity_id}/archive-candidates")
+    def identity_archive_candidates(identity_id: str) -> list[dict]:
+        identity = _identity_or_404(root, identity_id)
+        try:
+            return assistant.PersonalAssistant(root, identity).archive_candidates()
+        except assistant.AssistantError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.post("/api/identities/{identity_id}/archive-candidates/review")
+    def identity_archive_candidates_review(
+        identity_id: str, body: ArchiveCandidateBatchReviewBody
+    ) -> dict:
+        _require_controls()
+        identity = _identity_or_404(root, identity_id)
+        try:
+            return assistant.PersonalAssistant(root, identity).review_archive_candidates(
+                body.candidate_ids, body.state
+            )
+        except assistant.AssistantError as exc:
+            status = 404 if "not found" in str(exc) else 422
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+    @app.get("/api/identities/{identity_id}/archive-candidates/{candidate_id}")
+    def identity_archive_candidate(identity_id: str, candidate_id: str) -> dict:
+        identity = _identity_or_404(root, identity_id)
+        try:
+            result = assistant.PersonalAssistant(root, identity).archive_candidate(
+                candidate_id
+            )
+        except assistant.AssistantError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if result is None:
+            raise HTTPException(status_code=404, detail="Archive Candidate not found")
+        return result
+
+    @app.post(
+        "/api/identities/{identity_id}/archive-candidates/{candidate_id}/review"
+    )
+    def identity_archive_candidate_review(
+        identity_id: str, candidate_id: str, body: ArchiveCandidateReviewBody
+    ) -> dict:
+        _require_controls()
+        identity = _identity_or_404(root, identity_id)
+        try:
+            return assistant.PersonalAssistant(root, identity).review_archive_candidates(
+                [candidate_id], body.state
+            )["archive_candidates"][0]
+        except assistant.AssistantError as exc:
+            status = 404 if "not found" in str(exc) else 422
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/identities/{identity_id}/archive-candidates/{candidate_id}/evidence/{index}"
+    )
+    def identity_archive_candidate_evidence(
+        identity_id: str, candidate_id: str, index: int
+    ) -> dict:
+        identity = _identity_or_404(root, identity_id)
+        service = assistant.PersonalAssistant(root, identity)
+        try:
+            candidate = service.archive_candidate(candidate_id)
+            if candidate is None:
+                raise HTTPException(
+                    status_code=404, detail="Archive Candidate not found"
+                )
+            locators = candidate["evidence_locators"]
+            if index < 0 or index >= len(locators):
+                raise HTTPException(status_code=404, detail="Evidence not found")
+            locator = assistant.EvidenceLocator.decode(locators[index])
+            codex_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+            raw = service.resolve_evidence(
+                locator,
+                codex_home / "sessions",
+                codex_home / "archived_sessions",
+            )
+        except assistant.AssistantError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {
+            "locator": locator.to_dict(),
+            "sha256": locator.sha256,
+            "raw": raw.decode("utf-8"),
+        }
 
     @app.get("/api/identities/{identity_id}/proposals/{proposal_id}")
     def identity_proposal(identity_id: str, proposal_id: str) -> dict:

@@ -33,6 +33,8 @@ import type {
   ShadowGateMemory,
   ShadowGateObservation,
   ShadowGateReport,
+  ArchiveCandidate,
+  ArchiveCandidateEvidence,
 } from "~/lib/types";
 
 export const API_BASE = import.meta.env.VITE_API_URL ?? "";
@@ -225,6 +227,44 @@ export function reviewProposal(
 ): Promise<ImprovementProposal> {
   return postJson(
     `/api/identities/${encodeURIComponent(identityId)}/proposals/${encodeURIComponent(proposalId)}/review`,
+    { state }
+  );
+}
+
+export function fetchArchiveCandidates(
+  identityId: string
+): Promise<ArchiveCandidate[]> {
+  return getJson(
+    `/api/identities/${encodeURIComponent(identityId)}/archive-candidates`
+  );
+}
+
+export function fetchArchiveCandidate(
+  identityId: string,
+  candidateId: string
+): Promise<ArchiveCandidate> {
+  return getJson(
+    `/api/identities/${encodeURIComponent(identityId)}/archive-candidates/${encodeURIComponent(candidateId)}`
+  );
+}
+
+export function fetchArchiveCandidateEvidence(
+  identityId: string,
+  candidateId: string,
+  index: number
+): Promise<ArchiveCandidateEvidence> {
+  return getJson(
+    `/api/identities/${encodeURIComponent(identityId)}/archive-candidates/${encodeURIComponent(candidateId)}/evidence/${index}`
+  );
+}
+
+export function reviewArchiveCandidate(
+  identityId: string,
+  candidateId: string,
+  state: ProposalReviewState
+): Promise<ArchiveCandidate> {
+  return postJson(
+    `/api/identities/${encodeURIComponent(identityId)}/archive-candidates/${encodeURIComponent(candidateId)}/review`,
     { state }
   );
 }

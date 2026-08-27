@@ -66,6 +66,7 @@ class FakeLiteLLM:
                         "evidence_locators": [locators[-1]],
                         "memory_candidates": [],
                         "improvement_signals": [],
+                        "archive_candidates": [],
                     }
                     content = json.dumps(result)
                 elif "preserve autonomous native HeadLong learning" in prompt:

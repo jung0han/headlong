@@ -72,6 +72,7 @@ class FakeLiteLLM:
                                 "evidence_locators": [locators[-1]],
                             }
                         ],
+                        "archive_candidates": [],
                     }
                     finish_reason = "stop"
                     if owner.responses:

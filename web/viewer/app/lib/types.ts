@@ -247,6 +247,30 @@ export interface ImprovementProposal {
   reviewed_at: string | null;
 }
 
+export interface ArchiveCandidate {
+  candidate_id: string;
+  session_id: string;
+  project_id: string;
+  knowledge_scope: { kind: "project"; project_id: string };
+  completion_state: "completed";
+  completion_rationale: string;
+  analysis_state: "provisional" | "final";
+  source_analysis_event_id: string;
+  evidence_locators: ProposalEvidenceLocator[];
+  review_state: ProposalReviewState;
+  archive_authority: "none" | "authorized";
+  execution_authority: "none";
+  created_at: string | null;
+  review_event_id: string | null;
+  reviewed_at: string | null;
+}
+
+export interface ArchiveCandidateEvidence {
+  locator: ProposalEvidenceLocator;
+  sha256: string;
+  raw: string;
+}
+
 export interface ShadowGateReport {
   schema: "headlong.shadow-gate-report/v1";
   status: "not_started" | "collecting" | "not_ready" | "ready";

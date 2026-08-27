@@ -86,6 +86,23 @@ def build_parser() -> argparse.ArgumentParser:
     _memory_authority_args(accept)
     memory_commands.add_parser("rebuild")
 
+    archive_candidate = commands.add_parser(
+        "archive-candidate", help="inspect and review Codex Archive Candidates"
+    )
+    archive_commands = archive_candidate.add_subparsers(
+        dest="archive_candidate_command", required=True
+    )
+    archive_commands.add_parser("list")
+    archive_show = archive_commands.add_parser("show")
+    archive_show.add_argument("candidate_id")
+    archive_review = archive_commands.add_parser("review")
+    archive_review.add_argument("candidate_ids", nargs="+")
+    archive_review.add_argument(
+        "--state",
+        choices=("pending", "accepted", "rejected", "dismissed"),
+        required=True,
+    )
+
     context = commands.add_parser(
         "context", help="assemble scoped Active Memory and Reference context"
     )
@@ -257,6 +274,17 @@ def run(argv: list[str] | None = None) -> int:
                     memory_key=args.key,
                     project_selector=args.project,
                     global_scope=args.global_scope,
+                )
+        elif args.command == "archive-candidate":
+            if args.archive_candidate_command == "list":
+                result = {"archive_candidates": assistant.archive_candidates()}
+            elif args.archive_candidate_command == "show":
+                result = assistant.archive_candidate(args.candidate_id)
+                if result is None:
+                    raise AssistantError("Archive Candidate not found")
+            else:
+                result = assistant.review_archive_candidates(
+                    args.candidate_ids, args.state
                 )
         elif args.command == "context":
             result = assistant.response_context(

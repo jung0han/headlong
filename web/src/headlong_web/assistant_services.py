@@ -8,7 +8,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from headlong_web import authority, control, discovery, proposals, shadow_gate, trajectory
+from headlong_web import (
+    archive_candidates,
+    authority,
+    control,
+    discovery,
+    proposals,
+    shadow_gate,
+    trajectory,
+)
 
 
 class AssistantServiceError(RuntimeError):
@@ -130,6 +138,45 @@ class GovernanceService:
         if reviewed is None:
             raise AssistantServiceError("reviewed proposal disappeared from the ledger")
         return reviewed
+
+    def archive_candidates(self) -> list[dict[str, Any]]:
+        try:
+            return archive_candidates.build_inbox(self.ledger.events())
+        except archive_candidates.ArchiveCandidateError as exc:
+            raise AssistantServiceError(str(exc)) from exc
+
+    def archive_candidate(self, candidate_id: str) -> dict[str, Any] | None:
+        try:
+            return archive_candidates.find_candidate(self.ledger.events(), candidate_id)
+        except archive_candidates.ArchiveCandidateError as exc:
+            raise AssistantServiceError(str(exc)) from exc
+
+    def review_archive_candidates(
+        self, candidate_ids: list[str], state: str
+    ) -> list[dict[str, Any]]:
+        unique_ids = list(dict.fromkeys(candidate_ids))
+        if not unique_ids:
+            raise AssistantServiceError("select at least one Archive Candidate")
+        current: list[dict[str, Any]] = []
+        for candidate_id in unique_ids:
+            candidate = self.archive_candidate(candidate_id)
+            if candidate is None:
+                raise AssistantServiceError(
+                    f"Archive Candidate not found: {candidate_id}"
+                )
+            current.append(candidate)
+        try:
+            events = [
+                archive_candidates.review_event(candidate, state)
+                for candidate in current
+                if candidate["review_state"] != state
+            ]
+        except archive_candidates.ArchiveCandidateError as exc:
+            raise AssistantServiceError(str(exc)) from exc
+        for event in events:
+            self.ledger.append(event)
+        rebuilt = {item["candidate_id"]: item for item in self.archive_candidates()}
+        return [rebuilt[candidate_id] for candidate_id in unique_ids]
 
     def shadow_report(self) -> dict[str, Any]:
         try:
