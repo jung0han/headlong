@@ -13,7 +13,6 @@ import {
 } from "~/components/ui/empty";
 import { LoadingDots } from "~/components/ui/loading-dots";
 import {
-  fetchArchiveCandidate,
   fetchArchiveCandidateEvidence,
   fetchArchiveCandidates,
   fetchIdentityStatus,
@@ -60,11 +59,7 @@ export default function ArchiveCandidatesPage() {
     (selected && candidates?.some((item) => item.candidate_id === selected) && selected) ||
     candidates?.[0]?.candidate_id ||
     null;
-  const { data: candidate, isLoading: detailLoading } = useQuery({
-    queryKey: ["archive-candidate", identityId, active],
-    queryFn: () => fetchArchiveCandidate(identityId, active as string),
-    enabled: !!active,
-  });
+  const candidate = candidates?.find((item) => item.candidate_id === active);
   const { data: evidence, isFetching: evidenceLoading } = useQuery({
     queryKey: ["archive-candidate-evidence", identityId, active, evidenceIndex],
     queryFn: () =>
@@ -79,8 +74,7 @@ export default function ArchiveCandidatesPage() {
     mutationFn: (state: ProposalReviewState) =>
       reviewArchiveCandidate(identityId, active as string, state),
     onMutate: () => setReviewError(null),
-    onSuccess: (updated) => {
-      queryClient.setQueryData(["archive-candidate", identityId, active], updated);
+    onSuccess: () => {
       void queryClient.invalidateQueries({
         queryKey: ["archive-candidates", identityId],
       });
@@ -90,8 +84,7 @@ export default function ArchiveCandidatesPage() {
   const retry = useMutation({
     mutationFn: () => retryArchiveCandidate(identityId, active as string),
     onMutate: () => setReviewError(null),
-    onSuccess: (updated) => {
-      queryClient.setQueryData(["archive-candidate", identityId, active], updated);
+    onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["archive-candidates", identityId] });
     },
     onError: (error) => setReviewError(error.message),
@@ -117,11 +110,6 @@ export default function ArchiveCandidatesPage() {
         );
       }
       void queryClient.invalidateQueries({ queryKey: ["archive-candidates", identityId] });
-      if (active) {
-        void queryClient.invalidateQueries({
-          queryKey: ["archive-candidate", identityId, active],
-        });
-      }
     },
     onError: (error) => setExecutionError(error.message),
   });
@@ -222,7 +210,7 @@ export default function ArchiveCandidatesPage() {
             </div>
           </aside>
           <main className="min-h-72 min-w-0 flex-1 rounded-lg border bg-card p-4 sm:p-6">
-            {detailLoading || !candidate ? (
+            {!candidate ? (
               <LoadingDots />
             ) : (
               <>

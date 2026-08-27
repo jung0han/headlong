@@ -386,28 +386,30 @@ def test_public_analysis_dashboard_and_cli_review_are_idempotent_and_session_saf
     response = client.get(base)
     assert response.status_code == 200
     assert len(response.json()) == 2
-    detail = client.get(f"{base}/{first_id}")
-    assert detail.status_code == 200
-    assert detail.json()["evidence_locators"]
+    listed_by_id = {item["candidate_id"]: item for item in response.json()}
+    assert listed_by_id[first_id]["evidence_locators"]
+    assert listed_by_id[first_id]["review_state"] == "accepted"
+    assert listed_by_id[first_id]["execution_state"] in {"succeeded", "already_done"}
+    assert client.get(f"{base}/{first_id}").status_code == 404
+    assert (
+        client.post(
+            f"{base}/review",
+            json={"candidate_ids": [first_id, second_id], "state": "accepted"},
+        ).status_code
+        == 404
+    )
     evidence = client.get(f"{base}/{first_id}/evidence/0")
     assert evidence.status_code == 200
     assert evidence.json()["raw"].encode() in original_session.splitlines(keepends=True)
     individual = client.post(f"{base}/{first_id}/review", json={"state": "dismissed"})
     assert individual.status_code == 200
     assert individual.json()["review_state"] == "dismissed"
-    api_batch = client.post(
-        f"{base}/review",
-        json={"candidate_ids": [first_id, second_id], "state": "accepted"},
+    refreshed = client.get(base)
+    assert refreshed.status_code == 200
+    refreshed_first = next(
+        item for item in refreshed.json() if item["candidate_id"] == first_id
     )
-    assert api_batch.status_code == 200
-    after_batch = len(journal.read_text().splitlines())
-    assert after_batch == before_review + 11
-    api_replay = client.post(
-        f"{base}/review",
-        json={"candidate_ids": [first_id, second_id], "state": "accepted"},
-    )
-    assert api_replay.status_code == 200
-    assert len(journal.read_text().splitlines()) == after_batch
+    assert refreshed_first["review_state"] == "dismissed"
 
     read_only = TestClient(create_app(root, read_only=True, archive_adapter=archive_adapter))
     blocked = read_only.post(f"{base}/{first_id}/review", json={"state": "accepted"})

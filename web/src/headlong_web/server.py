@@ -179,10 +179,6 @@ class ArchiveCandidateReviewBody(BaseModel):
     model_config = {"extra": "forbid"}
 
 
-class ArchiveCandidateBatchReviewBody(ArchiveCandidateReviewBody):
-    candidate_ids: list[str]
-
-
 class ObservationEvaluationBody(BaseModel):
     useful: bool
     accurate: bool
@@ -740,33 +736,6 @@ def create_app(
             return _archive_assistant(identity).archive_candidates()
         except assistant.AssistantError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-    @app.post("/api/identities/{identity_id}/archive-candidates/review")
-    def identity_archive_candidates_review(
-        identity_id: str, body: ArchiveCandidateBatchReviewBody
-    ) -> dict:
-        _require_controls()
-        identity = _identity_or_404(root, identity_id)
-        try:
-            return _archive_assistant(identity).review_archive_candidates(
-                body.candidate_ids, body.state
-            )
-        except assistant.AssistantError as exc:
-            status = 404 if "not found" in str(exc) else 422
-            raise HTTPException(status_code=status, detail=str(exc)) from exc
-
-    @app.get("/api/identities/{identity_id}/archive-candidates/{candidate_id}")
-    def identity_archive_candidate(identity_id: str, candidate_id: str) -> dict:
-        identity = _identity_or_404(root, identity_id)
-        try:
-            result = _archive_assistant(identity).archive_candidate(
-                candidate_id
-            )
-        except assistant.AssistantError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        if result is None:
-            raise HTTPException(status_code=404, detail="Archive Candidate not found")
-        return result
 
     @app.post(
         "/api/identities/{identity_id}/archive-candidates/{candidate_id}/review"
