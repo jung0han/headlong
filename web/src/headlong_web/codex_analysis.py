@@ -10,12 +10,125 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from headlong_web.model_gateway import StructuredResultSchema
+
 ANALYSIS_SCHEMA = "headlong.codex-observation/v1"
 ANALYSIS_STATE_SCHEMA = "headlong.codex-analysis-state/v1"
 PROVISIONAL_AFTER = timedelta(minutes=5)
 FINAL_AFTER = timedelta(minutes=30)
 MAX_TITLE = 160
 MAX_CONTENT = 1200
+
+
+def result_schema(allowed: dict[str, dict[str, Any]]) -> StructuredResultSchema:
+    """Return the provider and local contract for one Codex source revision."""
+    locator = {"type": "string", "minLength": 1, "maxLength": 2048}
+    locators = {
+        "type": "array",
+        "items": locator,
+        "minItems": 1,
+        "maxItems": 50,
+    }
+    finding = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "content": {"type": "string", "minLength": 1, "maxLength": MAX_CONTENT},
+            "evidence_locators": locators,
+        },
+        "required": ["content", "evidence_locators"],
+    }
+    signal = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "kind": {
+                "type": "string",
+                "enum": [
+                    "user_correction",
+                    "test_failure",
+                    "tool_failure",
+                    "reviewer_finding",
+                    "observer_failure",
+                    "observer_regression",
+                    "inferred_pattern",
+                    "open_loop",
+                ],
+            },
+            "proposal_type": {"type": "string", "enum": ["work", "observer"]},
+            "content": {"type": "string", "minLength": 1, "maxLength": MAX_CONTENT},
+            "evidence_locators": locators,
+        },
+        "required": ["kind", "proposal_type", "content", "evidence_locators"],
+    }
+    document = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "title": {"type": "string", "minLength": 1, "maxLength": MAX_TITLE},
+            "observation": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": MAX_CONTENT,
+            },
+            "evidence_locators": locators,
+            "memory_candidates": {
+                "type": "array",
+                "items": finding,
+                "maxItems": 20,
+            },
+            "improvement_signals": {
+                "type": "array",
+                "items": signal,
+                "maxItems": 20,
+            },
+        },
+        "required": [
+            "title",
+            "observation",
+            "evidence_locators",
+            "memory_candidates",
+            "improvement_signals",
+        ],
+    }
+    return StructuredResultSchema(
+        name="codex_session_analysis",
+        document=document,
+        validate=lambda value: validate_result(value, allowed),
+    )
+
+
+def completed_result_schema() -> StructuredResultSchema:
+    """Return the compatibility contract for the public completed-session command."""
+    document = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "title": {"type": "string", "minLength": 1, "maxLength": MAX_TITLE},
+            "observation": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": MAX_CONTENT,
+            },
+        },
+        "required": ["title", "observation"],
+    }
+    return StructuredResultSchema(
+        name="completed_codex_session_analysis",
+        document=document,
+        validate=_validate_completed_result,
+    )
+
+
+def _validate_completed_result(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {"title", "observation"}:
+        raise AnalysisContractError("model observation does not match the required schema")
+    return {
+        "title": _compact_text(value["title"], MAX_TITLE, "observation title"),
+        "observation": _compact_text(
+            value["observation"], MAX_CONTENT, "observation"
+        ),
+    }
 
 
 class AnalysisContractError(ValueError):
@@ -115,15 +228,12 @@ def _findings(
         "open_loop",
     }
     finding_fields = {"kind", "content", "evidence_locators"}
-    expected = finding_fields if signal else {
+    expected = finding_fields | {"proposal_type"} if signal else {
         "content",
         "evidence_locators",
     }
     for value in values:
-        if not isinstance(value, dict) or (
-            set(value) != expected
-            and (not signal or set(value) != finding_fields | {"proposal_type"})
-        ):
+        if not isinstance(value, dict) or set(value) != expected:
             raise AnalysisContractError("model analysis finding does not match the schema")
         item = {
             "content": _compact_text(value["content"], MAX_CONTENT, "analysis finding"),
@@ -137,7 +247,7 @@ def _findings(
                     "model analysis signal has an unsupported kind"
                 )
             item["kind"] = value["kind"]
-            proposal_type = value.get("proposal_type", "work")
+            proposal_type = value["proposal_type"]
             if proposal_type not in {"work", "observer"}:
                 raise AnalysisContractError(
                     "model analysis signal has an unsupported proposal type"

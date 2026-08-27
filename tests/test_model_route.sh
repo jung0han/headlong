@@ -112,6 +112,7 @@ export LLM_PROVIDER=openai
 export LLM_API_URL="http://127.0.0.1:$PORT/v1/chat/completions"
 export SHELLM_MODEL=deepseek-flash-v4-private
 export OPENAI_API_KEY="probe-secret-$RANDOM-$RANDOM"
+export LLM_STRUCTURED_OUTPUT_MODE=strict
 
 # shellcheck disable=SC1091
 source "$APP/.identities/observer/activate"
@@ -126,7 +127,7 @@ HEALTH="$IDENTITY_DIR/run/model_route_health.json"
 check "health records both successful public paths" \
     jq -e '.ok == true and .paths.direct.status == "ok" and .paths.shellm.status == "ok"' "$HEALTH"
 check "health names explicit route references without values" \
-    jq -e '.route.provider == "openai" and .route.model == "deepseek-flash-v4-private" and .route.endpoint_ref == "LLM_API_URL" and .route.credential_ref == "OPENAI_API_KEY"' "$HEALTH"
+    jq -e '.route.provider == "openai" and .route.model == "deepseek-flash-v4-private" and .route.endpoint_ref == "LLM_API_URL" and .route.credential_ref == "OPENAI_API_KEY" and .route.structured_results == {"mode":"strict","source":"configured"}' "$HEALTH"
 check_not "health contains no credential value" grep -qF "$OPENAI_API_KEY" "$HEALTH"
 check_not "probe output contains no credential value" grep -qF "$OPENAI_API_KEY" "$WORK/probe.out" "$WORK/probe.err"
 

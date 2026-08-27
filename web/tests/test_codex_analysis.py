@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from headlong_web.assistant import PersonalAssistant, resolve_observer
@@ -33,6 +34,7 @@ class FakeLiteLLM:
     def __init__(self):
         self.calls: list[dict] = []
         self.fail = False
+        self.responses: list[tuple[object, str]] = []
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -52,7 +54,7 @@ class FakeLiteLLM:
                         for line in prompt.splitlines()
                         if line.startswith("EVIDENCE_LOCATOR ")
                     ]
-                    result = {
+                    result: object = {
                         "title": "Session work changed",
                         "observation": "The registered work has a new meaningful state.",
                         "evidence_locators": [locators[-1]],
@@ -65,16 +67,24 @@ class FakeLiteLLM:
                         "improvement_signals": [
                             {
                                 "kind": "tool_failure",
+                                "proposal_type": "work",
                                 "content": "A tool failure may justify a later proposal.",
                                 "evidence_locators": [locators[-1]],
                             }
                         ],
                     }
-                    content = json.dumps(result)
+                    finish_reason = "stop"
+                    if owner.responses:
+                        configured, finish_reason = owner.responses.pop(0)
+                        result = configured(result) if callable(configured) else configured
+                    content = result if isinstance(result, str) else json.dumps(result)
                     payload = json.dumps(
                         {
                             "choices": [
-                                {"message": {"content": content}, "finish_reason": "stop"}
+                                {
+                                    "message": {"content": content},
+                                    "finish_reason": finish_reason,
+                                }
                             ],
                             "usage": {"prompt_tokens": 20, "completion_tokens": 10},
                         }
@@ -141,11 +151,32 @@ def _configure_model(monkeypatch, model: FakeLiteLLM, tmp_path: Path) -> None:
     monkeypatch.setenv("LLM_API_URL", model.url)
 
 
+def _archived_assistant(tmp_path: Path, capsys):
+    root = tmp_path / "headlong"
+    root.mkdir()
+    identity = _identity(root)
+    project = tmp_path / "project"
+    project.mkdir()
+    active = tmp_path / "codex" / "sessions"
+    archived = tmp_path / "codex" / "archived_sessions"
+    active.mkdir(parents=True)
+    archived.mkdir(parents=True)
+    (archived / "session.jsonl").write_bytes(
+        _row({"type": "session_meta", "payload": {"id": SESSION_ID, "cwd": str(project)}})
+        + _row({"type": "event_msg", "payload": {"type": "task_complete"}})
+    )
+    assert _command(root, "project", "add", str(project)) == 0
+    capsys.readouterr()
+    clock = FakeClock(datetime(2026, 8, 27, 0, 0, tzinfo=timezone.utc))
+    return identity, active, archived, _assistant(root, clock)
+
+
 def test_provisional_final_and_later_revision_are_timed_and_append_only(
     tmp_path: Path, monkeypatch, capsys
 ):
     root = tmp_path / "headlong"
     root.mkdir()
+    (root / ".env").write_text("LLM_STRUCTURED_OUTPUT_MODE=strict\n")
     identity = _identity(root)
     project = tmp_path / "project"
     project.mkdir()
@@ -175,6 +206,11 @@ def test_provisional_final_and_later_revision_are_timed_and_append_only(
         clock.advance(seconds=1)
         assert assistant.analyze_codex_once(active, archived)["provisional"] == 1
         assert len(model.calls) == 1
+        response_format = model.calls[0]["response_format"]
+        assert response_format["type"] == "json_schema"
+        assert response_format["json_schema"]["name"] == "codex_session_analysis"
+        assert response_format["json_schema"]["strict"] is True
+        assert response_format["json_schema"]["schema"]["additionalProperties"] is False
         assert assistant.analyze_codex_once(active, archived)["duplicate"] == 1
 
         clock.advance(minutes=24, seconds=59)
@@ -301,3 +337,104 @@ def test_model_failure_keeps_cursor_and_final_marker_retriable(
             event for event in _events(identity) if event.get("analysis_state") == "failed"
         )
         assert failed["event_id"] in final["supersedes_event_ids"]
+
+
+def test_json_object_fallback_recovers_after_one_invalid_result(
+    tmp_path: Path, monkeypatch, capsys
+):
+    root = tmp_path / "headlong"
+    root.mkdir()
+    identity = _identity(root)
+    project = tmp_path / "project"
+    project.mkdir()
+    active = tmp_path / "codex" / "sessions"
+    archived = tmp_path / "codex" / "archived_sessions"
+    active.mkdir(parents=True)
+    archived.mkdir(parents=True)
+    session = archived / "session.jsonl"
+    session.write_bytes(
+        _row({"type": "session_meta", "payload": {"id": SESSION_ID, "cwd": str(project)}})
+        + _row({"type": "event_msg", "payload": {"type": "task_complete"}})
+    )
+    assert _command(root, "project", "add", str(project)) == 0
+    capsys.readouterr()
+    assistant = _assistant(
+        root, FakeClock(datetime(2026, 8, 27, 0, 0, tzinfo=timezone.utc))
+    )
+
+    with FakeLiteLLM() as model:
+        _configure_model(monkeypatch, model, tmp_path)
+        monkeypatch.setenv("LLM_STRUCTURED_OUTPUT_MODE", "json_object")
+        model.responses = [({"title": "missing contract fields"}, "stop")]
+        result = assistant.process_codex_once(active, archived)
+
+    assert result["analysis"]["final"] == 1
+    assert result["analysis"]["failed"] == 0
+    assert len(model.calls) == 2
+    assert all(call["response_format"] == {"type": "json_object"} for call in model.calls)
+    assert any(event.get("analysis_state") == "final" for event in _events(identity))
+
+
+def test_json_object_fallback_double_failure_is_observable_without_analysis(
+    tmp_path: Path, monkeypatch, capsys
+):
+    identity, active, archived, assistant = _archived_assistant(tmp_path, capsys)
+    with FakeLiteLLM() as model:
+        _configure_model(monkeypatch, model, tmp_path)
+        monkeypatch.setenv("LLM_STRUCTURED_OUTPUT_MODE", "json_object")
+        model.responses = [
+            ({"title": "missing contract fields"}, "stop"),
+            ({"title": "still missing contract fields"}, "stop"),
+        ]
+        result = assistant.process_codex_once(active, archived)
+
+    assert result["analysis"]["failed"] == 1
+    assert len(model.calls) == 2
+    events = _events(identity)
+    assert any(event.get("analysis_state") == "failed" for event in events)
+    assert not any(event.get("analysis_state") == "final" for event in events)
+
+
+def test_strict_mode_rejects_unknown_fields_without_retry_or_analysis(
+    tmp_path: Path, monkeypatch, capsys
+):
+    identity, active, archived, assistant = _archived_assistant(tmp_path, capsys)
+
+    def add_unknown(result: dict) -> dict:
+        return {**result, "provider_note": "must not persist"}
+
+    with FakeLiteLLM() as model:
+        _configure_model(monkeypatch, model, tmp_path)
+        monkeypatch.setenv("LLM_STRUCTURED_OUTPUT_MODE", "strict")
+        model.responses = [(add_unknown, "stop")]
+        result = assistant.process_codex_once(active, archived)
+
+    assert result["analysis"]["failed"] == 1
+    assert len(model.calls) == 1
+    assert not any(event.get("analysis_state") == "final" for event in _events(identity))
+
+
+@pytest.mark.parametrize(
+    ("configured", "finish_reason"),
+    [
+        (lambda result: result, "length"),
+        ("x" * 64_001, "stop"),
+        ("", "stop"),
+    ],
+    ids=("truncated", "oversized", "empty"),
+)
+def test_strict_mode_rejects_invalid_output_without_analysis(
+    tmp_path: Path, monkeypatch, capsys, configured, finish_reason
+):
+    identity, active, archived, assistant = _archived_assistant(tmp_path, capsys)
+    with FakeLiteLLM() as model:
+        _configure_model(monkeypatch, model, tmp_path)
+        monkeypatch.setenv("LLM_STRUCTURED_OUTPUT_MODE", "strict")
+        model.responses = [(configured, finish_reason)]
+        result = assistant.process_codex_once(active, archived)
+
+    assert result["analysis"]["failed"] == 1
+    assert len(model.calls) == 1
+    assert not any(
+        event.get("analysis_state") == "final" for event in _events(identity)
+    )

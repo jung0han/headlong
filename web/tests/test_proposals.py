@@ -43,6 +43,7 @@ class FakeLiteLLM:
                 signals = [
                     {
                         "kind": kind,
+                        "proposal_type": "work",
                         "content": f"Improve the work after this {kind}.",
                         "evidence_locators": [locator],
                     }
@@ -52,11 +53,13 @@ class FakeLiteLLM:
                     [
                         {
                             "kind": "inferred_pattern",
+                            "proposal_type": "work",
                             "content": "An agent suspects a recurring pattern.",
                             "evidence_locators": [locator],
                         },
                         {
                             "kind": "open_loop",
+                            "proposal_type": "work",
                             "content": "An agent suggested following up later.",
                             "evidence_locators": [locator],
                         },

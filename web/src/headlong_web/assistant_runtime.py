@@ -198,6 +198,11 @@ def _model_route(path: Path, secrets: set[str]) -> dict[str, Any]:
     paths = value.get("paths") if isinstance(value.get("paths"), dict) else {}
     direct = paths.get("direct") if isinstance(paths.get("direct"), dict) else {}
     shellm = paths.get("shellm") if isinstance(paths.get("shellm"), dict) else {}
+    structured = (
+        route.get("structured_results")
+        if isinstance(route.get("structured_results"), dict)
+        else {}
+    )
     if not value or not isinstance(value.get("ok"), bool):
         return {"status": "unknown", "checked_at": None, "route": {}, "paths": {}}
     return {
@@ -211,6 +216,16 @@ def _model_route(path: Path, secrets: set[str]) -> dict[str, Any]:
                 {"provider-default", "LLM_API_URL", "SHELLM_API_URL"},
                 "unknown",
             ),
+            "structured_results": {
+                "mode": _choice(
+                    structured.get("mode"), {"strict", "json_object"}, "unknown"
+                ),
+                "source": _choice(
+                    structured.get("source"),
+                    {"configured", "route_default"},
+                    "unknown",
+                ),
+            },
         },
         "paths": {
             "direct": {

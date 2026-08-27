@@ -29,6 +29,7 @@ LiteLLM: the model catalog name does not have to resemble an OpenAI model.
 | `LLM_MODEL` | `bin/llm`'s own knob; equivalent to `-m` |
 | `LLM_PROVIDER` | Explicit provider/wire protocol; use `openai` for an OpenAI-compatible LiteLLM route |
 | `LLM_API_URL` | Shared explicit endpoint used by direct calls and, unless overridden, shellm |
+| `LLM_STRUCTURED_OUTPUT_MODE` | Auxiliary result capability: `strict` for a route verified to support strict JSON Schema, otherwise `json_object` (the safe default) |
 | `SHELLM_API_URL` | Optional shellm-only endpoint override |
 
 ## Resolution chains

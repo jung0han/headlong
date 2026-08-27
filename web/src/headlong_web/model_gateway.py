@@ -4,14 +4,32 @@ from __future__ import annotations
 
 import json
 import subprocess
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
-from headlong_web import control, discovery
+from headlong_web import control, discovery, envfile
 
 
 class ModelGatewayError(RuntimeError):
     """A model could not run or returned a malformed bounded result."""
+
+
+class ModelResultInvalidError(ModelGatewayError):
+    """A provider returned output that cannot be a complete bounded result."""
+
+
+MAX_STRUCTURED_RESULT_CHARS = 64_000
+
+
+@dataclass(frozen=True)
+class StructuredResultSchema:
+    """One caller-owned JSON Schema paired with its local validator."""
+
+    name: str
+    document: dict[str, Any]
+    validate: Callable[[Any], dict[str, Any]]
 
 
 class ModelGateway:
@@ -29,8 +47,9 @@ class ModelGateway:
         token_timeout: int,
         operation: str,
         max_chars: int | None = None,
+        route_args: tuple[str, ...] = (),
     ) -> str:
-        env = control.identity_env(self.identity, self.root)
+        env = self._route_env()
         cmd = control._wrap(
             "llm",
             "--no-stream",
@@ -38,6 +57,7 @@ class ModelGateway:
             str(token_timeout),
             "--system-prompt",
             system,
+            *route_args,
         )
         try:
             proc = subprocess.run(
@@ -53,10 +73,14 @@ class ModelGateway:
             raise ModelGatewayError(f"{operation} failed to run") from exc
         if proc.returncode != 0:
             detail = (proc.stderr or "model call failed").strip().splitlines()[-1]
+            if route_args and "structured result truncated" in detail:
+                raise ModelResultInvalidError(f"{operation} failed: {detail}")
             raise ModelGatewayError(f"{operation} failed: {detail}")
         output = proc.stdout.strip()
         if not output or (max_chars is not None and len(output) > max_chars):
-            raise ModelGatewayError(f"{operation} is empty or exceeds compact limits")
+            raise ModelResultInvalidError(
+                f"{operation} is empty or exceeds compact limits"
+            )
         return output
 
     def complete_json(
@@ -80,3 +104,88 @@ class ModelGateway:
         if not isinstance(value, dict):
             raise ModelGatewayError(f"{operation} JSON must be an object")
         return value
+
+    def complete_structured(
+        self,
+        prompt: str,
+        *,
+        system: str,
+        token_timeout: int,
+        operation: str,
+        schema: StructuredResultSchema,
+    ) -> dict[str, Any]:
+        """Return one locally validated result using the route's best schema mode."""
+        env = self._route_env()
+        mode = _structured_mode(env)
+        attempts = 1 if mode == "strict" else 2
+        schema_path: Path | None = None
+        try:
+            if mode == "strict":
+                with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", suffix=".json", delete=False
+                ) as fh:
+                    json.dump(schema.document, fh, separators=(",", ":"))
+                    schema_path = Path(fh.name)
+                route_args = ("--response-schema", schema.name, str(schema_path))
+            else:
+                route_args = ("--json-object",)
+
+            last_error = "did not match the required schema"
+            for attempt in range(attempts):
+                retry_system = system
+                if mode == "json_object":
+                    retry_system += "\nReturn exactly one JSON object and no other text."
+                if attempt:
+                    retry_system += (
+                        "\nThe previous JSON object was invalid. Return exactly one object "
+                        "that satisfies the requested contract."
+                    )
+                try:
+                    output = self.complete_text(
+                        prompt,
+                        system=retry_system,
+                        token_timeout=token_timeout,
+                        operation=operation,
+                        max_chars=MAX_STRUCTURED_RESULT_CHARS,
+                        route_args=route_args,
+                    )
+                    value = json.loads(output)
+                    if not isinstance(value, dict):
+                        raise ValueError("result is not an object")
+                    return schema.validate(value)
+                except json.JSONDecodeError:
+                    last_error = "returned invalid JSON"
+                except ValueError as exc:
+                    last_error = str(exc) or last_error
+                except ModelResultInvalidError as exc:
+                    last_error = str(exc)
+            raise ModelGatewayError(f"{operation} {last_error}")
+        finally:
+            if schema_path is not None:
+                schema_path.unlink(missing_ok=True)
+
+    def _route_env(self) -> dict[str, str]:
+        """Resolve route configuration with the same root/identity precedence as llm."""
+        env = control.identity_env(self.identity, self.root)
+        for path in (self.root / ".env", self.identity.path / ".env"):
+            env.update(envfile.parse_env_file(path))
+        return env
+
+
+def _structured_mode(env: dict[str, str]) -> str:
+    provider = env.get("LLM_PROVIDER", "").strip().lower()
+    if provider not in {"openai", "openrouter", "opencode-go"}:
+        raise ModelGatewayError(
+            "Structured Model Results require an OpenAI-compatible model route"
+        )
+    configured = env.get("LLM_STRUCTURED_OUTPUT_MODE", "").strip().lower()
+    if configured in {"strict", "json_object"}:
+        return configured
+    if configured:
+        raise ModelGatewayError(
+            "LLM_STRUCTURED_OUTPUT_MODE must be strict or json_object"
+        )
+    # An OpenAI-compatible wire format does not prove that the routed model
+    # implements strict schemas. Stay on the compatibility path until the
+    # operator or a capability probe records explicit support.
+    return "json_object"

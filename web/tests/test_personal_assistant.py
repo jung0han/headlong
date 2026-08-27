@@ -141,6 +141,7 @@ def test_completed_codex_session_becomes_one_resolvable_compact_observation(
     monkeypatch.setenv("SHELLM_MODEL", "deepseek-flash-v4-private")
     monkeypatch.setenv("OPENAI_API_KEY", "fake-test-key")
     monkeypatch.setenv("LLM_RETRIES", "0")
+    monkeypatch.setenv("LLM_STRUCTURED_OUTPUT_MODE", "strict")
 
     assert _command(root, "project", "add", str(project), "--name", "registered") == 0
     added = json.loads(capsys.readouterr().out)
@@ -162,6 +163,7 @@ def test_completed_codex_session_becomes_one_resolvable_compact_observation(
         first = json.loads(capsys.readouterr().out)
         assert first == {"discovered": 1, "duplicate": 0, "eligible": 1, "observed": 1}
         assert len(model.calls) == 1
+        assert model.calls[0]["response_format"]["type"] == "json_schema"
         sent = model.calls[0]["messages"][-1]["content"]
         assert SESSION_ID in sent
         assert "RAW_TOOL_PAYLOAD_MUST_NOT_ENTER_THE_LEDGER" in sent

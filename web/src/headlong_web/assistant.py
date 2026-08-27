@@ -1414,8 +1414,8 @@ class PersonalAssistant:
         except OSError as exc:
             raise AssistantError(f"cannot read Codex Session: {session.path}") from exc
         system = (
-            "You analyze one completed Codex development session. Return only a JSON "
-            'object with exactly two string fields: "title" and "observation". '
+            "You analyze one completed Codex development session. Produce one result "
+            'with exactly two string fields: "title" and "observation". '
             "Describe the meaningful outcome, correction, failure, decision, or open loop. "
             "Be compact; do not reproduce the transcript or complete tool payloads."
         )
@@ -1426,28 +1426,15 @@ class PersonalAssistant:
             f"{transcript}"
         )
         try:
-            value = self._model.complete_json(
+            return self._model.complete_structured(
                 prompt,
                 system=system,
                 token_timeout=1200,
                 operation="Codex Session analysis",
+                schema=codex_analysis.completed_result_schema(),
             )
         except model_gateway.ModelGatewayError as exc:
             raise AssistantError(str(exc)) from exc
-        if not isinstance(value, dict) or set(value) != {"title", "observation"}:
-            raise AssistantError("model observation does not match the required schema")
-        title = value["title"]
-        observation = value["observation"]
-        if (
-            not isinstance(title, str)
-            or not title.strip()
-            or len(title) > _MAX_TITLE
-            or not isinstance(observation, str)
-            or not observation.strip()
-            or len(observation) > _MAX_OBSERVATION
-        ):
-            raise AssistantError("model observation is empty or exceeds compact limits")
-        return {"title": title.strip(), "observation": observation.strip()}
 
     def _analyze_revision(
         self,
@@ -1462,7 +1449,7 @@ class PersonalAssistant:
             annotated.append(f"EVIDENCE_LOCATOR {locator.encode()}")
             annotated.append(raw.decode("utf-8", errors="replace").rstrip("\n"))
         system = (
-            "You analyze one Codex development session revision. Return only JSON "
+            "You analyze one Codex development session revision. Produce one result "
             "with exactly these fields: title (string), observation (string), "
             "evidence_locators (non-empty array of supplied locator strings), "
             "memory_candidates (array of objects with exactly content and "
@@ -1486,17 +1473,14 @@ class PersonalAssistant:
             + "\n".join(annotated)
         )
         try:
-            value = self._model.complete_json(
+            return self._model.complete_structured(
                 prompt,
                 system=system,
                 token_timeout=1600,
                 operation="Codex Session analysis",
+                schema=codex_analysis.result_schema(allowed),
             )
         except model_gateway.ModelGatewayError as exc:
-            raise AssistantError(str(exc)) from exc
-        try:
-            return codex_analysis.validate_result(value, allowed)
-        except codex_analysis.AnalysisContractError as exc:
             raise AssistantError(str(exc)) from exc
 
     def _sync_analysis_revision(
