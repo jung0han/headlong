@@ -16,7 +16,8 @@ from headlong_web.server import create_app
 ROOT_TRAJ = "aaaaaaaa-1111-4111-8111-111111111111"
 MEMORY_EVENT_ID = "bbbbbbbb-2222-4222-8222-222222222222"
 DOWNSTREAM_EVENT_ID = "cccccccc-3333-4333-8333-333333333333"
-UNRELATED_ACTION_ID = "dddddddd-4444-4444-8444-444444444444"
+EARLY_ACTION_ID = "dddddddd-4444-4444-8444-444444444444"
+WRONG_TRAJECTORY_ACTION_ID = "99999999-7777-4777-8777-777777777777"
 PROPOSAL_EVENT_ID = "eeeeeeee-5555-4555-8555-555555555555"
 PROPOSAL_LOCATOR = {
     "schema": "headlong.evidence-locator/v1",
@@ -44,9 +45,9 @@ def _assistant(tmp_path: Path) -> PersonalAssistant:
         "evidence_locators": [{"kind": "activity_ledger_event", "event_id": ROOT_TRAJ}],
         "content": "A learned project decision.",
     }
-    unrelated_action = {
+    early_action = {
         "type": "action",
-        "step_id": UNRELATED_ACTION_ID,
+        "step_id": EARLY_ACTION_ID,
         "source": "inner_monologue",
         "content": "An action recorded before the memory existed.",
     }
@@ -59,7 +60,7 @@ def _assistant(tmp_path: Path) -> PersonalAssistant:
     (trajectory / "trajectory.jsonl").write_text(
         json.dumps({"type": "trajectory", "step_id": ROOT_TRAJ})
         + "\n"
-        + json.dumps(unrelated_action)
+        + json.dumps(early_action)
         + "\n"
         + json.dumps(memory)
         + "\n"
@@ -131,17 +132,54 @@ def test_behavior_affecting_requires_reproducible_downstream_event(
         )
 
 
-def test_behavior_affecting_rejects_an_action_that_precedes_the_memory(
+def test_behavior_affecting_accepts_action_before_asynchronous_memory_capture(
     tmp_path: Path,
 ) -> None:
     assistant = _assistant(tmp_path)
 
-    with pytest.raises(AssistantError, match="must follow the Active Memory"):
+    reported = assistant.report_memory_issue(
+        MEMORY_EVENT_ID,
+        "behavior_affecting",
+        "The action exposed harm before asynchronous memory capture completed.",
+        downstream_step_id=EARLY_ACTION_ID,
+    )
+
+    assert reported["downstream_step_id"] == EARLY_ACTION_ID
+    assert reported["downstream_action_snapshot"]["content"] == (
+        "An action recorded before the memory existed."
+    )
+    assert reported["downstream_evidence_locators"][0]["trajectory_id"] == ROOT_TRAJ
+
+
+def test_behavior_affecting_rejects_action_outside_observer_root_trajectory(
+    tmp_path: Path,
+) -> None:
+    assistant = _assistant(tmp_path)
+    other = (
+        assistant.identity.path
+        / "trajectories"
+        / "99999999-other"
+        / "trajectory.jsonl"
+    )
+    other.parent.mkdir()
+    other.write_text(
+        json.dumps(
+            {
+                "type": "action",
+                "step_id": WRONG_TRAJECTORY_ACTION_ID,
+                "source": "inner_monologue",
+                "content": "This action belongs to another trajectory.",
+            }
+        )
+        + "\n"
+    )
+
+    with pytest.raises(AssistantError, match="not found"):
         assistant.report_memory_issue(
             MEMORY_EVENT_ID,
             "behavior_affecting",
-            "An earlier action cannot be an effect of later memory.",
-            downstream_step_id=UNRELATED_ACTION_ID,
+            "A different trajectory cannot establish the effect.",
+            downstream_step_id=WRONG_TRAJECTORY_ACTION_ID,
         )
 
 
