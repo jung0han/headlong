@@ -80,6 +80,7 @@ run_step() {  # $1 = trigger json
 }
 WAKE='{"type":"monolith-wake","content":"wake","source":"monolith-timer"}'
 REACTIVE='{"type":"observation","step_id":"ext-1","content":"external event","source":"tester"}'
+ASSISTANT_OBSERVATION='{"type":"observation","step_id":"assistant-1","content":"A reusable project decision was observed.","source":"personal_assistant","knowledge_scope":{"kind":"project","project_id":"project-1"},"evidence_locators":[{"kind":"codex_event"}]}'
 
 delay() {  # wake_at minus now (integer seconds; "-" if no file)
     [[ -f "$WAKE_AT" ]] || { echo "-"; return; }
@@ -191,6 +192,16 @@ if grep -q '\*\*share\*\*' "$STUB_CAPTURE" 2>/dev/null; then
     ok "prompt menu includes the share function"
 else
     bad "prompt menu includes the share function"
+fi
+
+# --- 9. scoped assistant observations enter the native learn route -----------
+run_step "$ASSISTANT_OBSERVATION"
+if grep -q 'scoped, evidence-linked Personal Assistant Observation' "$STUB_CAPTURE" \
+    && grep -qi 'facts, lessons, decisions, preferences, constraints, goals, or values' "$STUB_CAPTURE" \
+    && grep -q 'without candidate approval' "$STUB_CAPTURE"; then
+    ok "assistant observation can route directly to every native memory type"
+else
+    bad "assistant observation can route directly to every native memory type"
 fi
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

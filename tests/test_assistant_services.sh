@@ -72,7 +72,7 @@ check "Observer thinker cannot see the authority journal" \
 check "Observer thinker has filesystem and privilege isolation" \
     bash -c 'grep -q "^ProtectSystem=strict" "$1" && grep -q "^NoNewPrivileges=true" "$1" && grep -q "^PrivateDevices=true" "$1"' \
         _ "$REPO/deploy/headlong-thinkers@.service"
-check "proposal-only shell actor is not given trajectory authority" \
+check "proposal-only shell actor keeps identity-local native learning authority" \
     bash -c 'grep -q "HEADLONG_PROPOSAL_ONLY" "$1" && grep -q "proposal-only Observer requires a container" "$2"' \
         _ "$REPO/thinkers/_lib/common.sh" "$REPO/thinkers/monolith/step"
 check "thinker service can reconcile the bundled roster" \
@@ -89,10 +89,11 @@ actor_flags=$(bash -c '
       GITHUB_TOKEN=forbidden SLACK_TOKEN=forbidden \
       _build_shellm_flags "$2" "$2/run"
 ' _ "$REPO/thinkers/_lib/common.sh" "$WORK/actor")
-if ! grep -q 'TRAJ_DIR\|TRAJ_ID\|GITHUB_TOKEN\|SLACK_TOKEN' <<<"$actor_flags"; then
-    ok "proposal-only actor flag allowlist omits trajectory and unrelated credentials"
+if grep -q 'TRAJ_DIR\|TRAJ_ID' <<<"$actor_flags" \
+    && ! grep -q 'GITHUB_TOKEN\|SLACK_TOKEN' <<<"$actor_flags"; then
+    ok "proposal-only actor retains native trajectory without unrelated credentials"
 else
-    bad "proposal-only actor flag allowlist omits trajectory and unrelated credentials"
+    bad "proposal-only actor retains native trajectory without unrelated credentials"
 fi
 if grep -qx 'OPENAI_API_KEY' <<<"$actor_flags"; then
     ok "proposal-only actor retains only its OpenAI-compatible route credential"

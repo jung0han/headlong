@@ -188,6 +188,10 @@ if printf '%s' "$recent_context" | tail -n 1 | jq -e 'select(.type == "action")'
     hints="${hints}- The most recent step is an ACTION that has no observation yet — it may need carrying out (act).
 "
 fi
+if [[ "$trigger_type" == "observation" && "$trigger_source" == "personal_assistant" ]]; then
+    hints="${hints}- This is a scoped, evidence-linked Personal Assistant Observation. If it contains reusable knowledge, you may choose native learn now without candidate approval.
+"
+fi
 if [[ $(printf '%s\n' "$last_three" | jq -r '.type' 2>/dev/null | sort -u | tr '\n' ' ') == "thought " ]]; then
     hints="${hints}- The last few steps are all thoughts — the stream may be circling; consider acting, recalling, or advancing decisively.
 "
@@ -237,7 +241,8 @@ if [[ "${HEADLONG_PROPOSAL_ONLY:-0}" == "1" && "${LLM_PROVIDER:-}" != "openai" ]
     exit 1
 fi
 
-# Build shellm flags (the proposal-only form omits trajectory authority).
+# Build shellm flags. The proposal-only Observer keeps only identity-local
+# trajectory and memory mutation authority; Registered Projects stay unmounted.
 shellm_flags=()
 while IFS= read -r _flag; do
     [[ -n "$_flag" ]] && shellm_flags+=("$_flag")

@@ -340,10 +340,12 @@ _build_shellm_flags() {
     printf '%s\n' "--var" "MEM_DIR=$abs_mem_dir"
     printf '%s\n' "--var" "SKILLS_DIR=$abs_skills_dir"
     printf '%s\n' "--var" "SKILLS_KERNEL_DIR=$abs_kernel_dir"
-    if [[ "${HEADLONG_PROPOSAL_ONLY:-0}" != "1" ]]; then
-        printf '%s\n' "--var" "TRAJ_DIR=$abs_traj_dir"
-        printf '%s\n' "--var" "TRAJ_ID=$TRAJ_ID"
-    fi
+    # The Observer's native monolith must retain its identity-local trajectory:
+    # learn/goals/values use `mem` and then record a thought through `traj`.
+    # The proposal-only boundary still withholds Registered Projects, external
+    # credentials, and the protected authority journal.
+    printf '%s\n' "--var" "TRAJ_DIR=$abs_traj_dir"
+    printf '%s\n' "--var" "TRAJ_ID=$TRAJ_ID"
 
     # Propagate model + API keys to nested shellm calls. Inside Docker, .env
     # isn't mounted, so without these the nested call hits the final else in
@@ -399,9 +401,6 @@ _build_shellm_flags() {
     # Standard binaries
     local cmd
     for cmd in mem traj skills context llm shellm chat glob view put sub; do
-        if [[ "$cmd" == "traj" && "${HEADLONG_PROPOSAL_ONLY:-0}" == "1" ]]; then
-            continue
-        fi
         local path
         path=$(command -v "$cmd" 2>/dev/null) || continue
         printf '%s\n' "--bin" "$path"
