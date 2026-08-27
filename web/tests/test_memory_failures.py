@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from headlong_web import proposals
 from headlong_web.assistant import AssistantError, PersonalAssistant, resolve_observer
 from headlong_web.assistant_cli import run
 from headlong_web.server import create_app
@@ -18,11 +19,19 @@ MEMORY_EVENT_ID = "bbbbbbbb-2222-4222-8222-222222222222"
 DOWNSTREAM_EVENT_ID = "cccccccc-3333-4333-8333-333333333333"
 EARLY_ACTION_ID = "dddddddd-4444-4444-8444-444444444444"
 WRONG_TRAJECTORY_ACTION_ID = "99999999-7777-4777-8777-777777777777"
-PROPOSAL_EVENT_ID = "eeeeeeee-5555-4555-8555-555555555555"
+PROPOSAL_ANALYSIS_ID = "eeeeeeee-5555-4555-8555-555555555555"
+PROPOSAL_SESSION_ID = "ffffffff-6666-4666-8666-666666666666"
 PROPOSAL_LOCATOR = {
     "schema": "headlong.evidence-locator/v1",
     "kind": "codex_event",
-    "source_identity": "ffffffff-6666-4666-8666-666666666666",
+    "source_identity": PROPOSAL_SESSION_ID,
+    "source_root": "active",
+    "relative_path": "session.jsonl",
+    "line": 2,
+    "byte_offset": 100,
+    "byte_length": 20,
+    "sha256": "a" * 64,
+    "host": "test-host",
 }
 
 
@@ -44,18 +53,21 @@ def _assistant(tmp_path: Path) -> PersonalAssistant:
         "knowledge_scope": {"kind": "project", "project_id": "project-one"},
         "evidence_locators": [{"kind": "activity_ledger_event", "event_id": ROOT_TRAJ}],
         "content": "A learned project decision.",
+        "ts": "2026-08-27T00:02:00Z",
     }
     early_action = {
         "type": "action",
         "step_id": EARLY_ACTION_ID,
         "source": "inner_monologue",
         "content": "An action recorded before the memory existed.",
+        "ts": "2026-08-27T00:00:00Z",
     }
     downstream = {
         "type": "action",
         "step_id": DOWNSTREAM_EVENT_ID,
         "source": "inner_monologue",
         "content": "Act on the stale project decision.",
+        "ts": "2026-08-27T00:03:00Z",
     }
     (trajectory / "trajectory.jsonl").write_text(
         json.dumps({"type": "trajectory", "step_id": ROOT_TRAJ})
@@ -183,28 +195,40 @@ def test_behavior_affecting_rejects_action_outside_observer_root_trajectory(
         )
 
 
-def test_behavior_affecting_still_accepts_a_proposal_event_with_evidence(
+def test_behavior_affecting_accepts_signed_proposal_before_async_memory_capture(
     tmp_path: Path,
 ) -> None:
     assistant = _assistant(tmp_path)
-    assistant._ledger.append(
+    proposal = proposals.direct_proposal_events(
         {
-            "type": "work-improvement-proposal",
-            "step_id": PROPOSAL_EVENT_ID,
-            "event_id": PROPOSAL_EVENT_ID,
-            "evidence_locators": [PROPOSAL_LOCATOR],
-            "content": "A concrete downstream proposal.",
+            "type": "observation",
+            "event_id": PROPOSAL_ANALYSIS_ID,
+            "source": "personal_assistant",
+            "source_identity": PROPOSAL_SESSION_ID,
+            "analysis_state": "final",
+            "task_root_id": ROOT_TRAJ,
+            "knowledge_scope": {"kind": "project", "project_id": "project-one"},
+            "improvement_signals": [
+                {
+                    "kind": "reviewer_finding",
+                    "proposal_type": "work",
+                    "content": "A concrete downstream proposal.",
+                    "evidence_locators": [PROPOSAL_LOCATOR],
+                }
+            ],
         }
-    )
+    )[0]
+    proposal = {**proposal, "ts": "2026-08-27T00:01:00Z"}
+    assistant._ledger.append(proposal)
 
     reported = assistant.report_memory_issue(
         MEMORY_EVENT_ID,
         "behavior_affecting",
         "The stale memory changed a proposal.",
-        downstream_event_id=PROPOSAL_EVENT_ID,
+        downstream_event_id=proposal["event_id"],
     )
 
-    assert reported["downstream_event_id"] == PROPOSAL_EVENT_ID
+    assert reported["downstream_event_id"] == proposal["event_id"]
     assert reported["downstream_event_type"] == "work-improvement-proposal"
     assert reported["downstream_evidence_locators"] == [PROPOSAL_LOCATOR]
     assert reported["downstream_step_id"] is None

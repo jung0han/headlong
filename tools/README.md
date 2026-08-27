@@ -39,8 +39,8 @@ tools live in [bin/](../bin/).
   quality observations. A `behavior_affecting` report also requires
   `--downstream-event-id` for a concrete Proposal event or
   `--downstream-step-id` for a native action; action reports retain a trajectory
-  locator and compact snapshot, regardless of asynchronous memory-capture row
-  ordering.
+  locator and compact snapshot. Proposal and action reports do not infer
+  causality from asynchronous memory-capture row ordering.
   `native-memory rebuild/restore` recovers the native
   Markdown store from its Activity Ledger history.
 - `headlong-archive-boundary` serves the authenticated, archive-only Unix

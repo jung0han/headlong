@@ -225,8 +225,8 @@ behavior-affecting report must identify the concrete downstream proposal or
 native action step. Proposals retain their event Evidence Locators; native
 actions retain a stable root-trajectory step locator plus a compact immutable
 snapshot and content digest. Native memory capture is asynchronous, so the
-action step may precede the later memory-capture ledger row; the signed user
-report supplies the causal assertion instead of append order.
+Proposal event or action step may precede the later memory-capture ledger row;
+the signed user report supplies the causal assertion instead of append order.
 
 Before enabling a new Observer, render and verify the shipped units without
 touching production:
