@@ -33,7 +33,9 @@ mkdir -p "$WORK/bin"
 cat > "$WORK/bin/llm" <<'EOF'
 #!/usr/bin/env bash
 input=$(cat)
+printf '%s\n' "$*" >> "$LLM_ARG_LOG"
 printf 'CALL\n%s\n---\n' "$input" >> "$LLM_LOG"
+[[ "${LLM_FAIL:-0}" -eq 1 ]] && { printf 'structured result failure\n' >&2; exit 1; }
 first_step=$(printf '%s' "$input" | grep -o '\[[0-9a-z?]\{1,8\}\]' | head -1 | tr -d '[]')
 if printf '%s' "$input" | grep -q '^EPISODE '; then
     printf '{"arc":"the agent explored and built things","themes":[{"name":"exploration","description":"poking around","episodes":[1],"key_steps":[{"step":"%s","note":"first poke"}]}]}' "$first_step"
@@ -45,6 +47,7 @@ EOF
 chmod +x "$WORK/bin/llm"
 export PATH="$WORK/bin:$REPO/bin:$PATH"
 export LLM_LOG="$WORK/llm.log"
+export LLM_ARG_LOG="$WORK/llm-args.log"
 
 # --- synthetic mind log: seeds + idle noise + signal steps ------------------
 TRAJ_ROOT="$WORK/trajectories"
@@ -87,6 +90,8 @@ check_not "seed steps in windows" grep -q 'seedling' "$LLM_LOG"
 check "text output has themes"   grep -q "THEMES" <<<"$out"
 check "text output has episodes" grep -q "EPISODES" <<<"$out"
 check "step refs in output"      grep -q "th000001" <<<"$out"
+check "episode uses its structured schema" grep -q -- '--structured-result recap_episode {' "$LLM_ARG_LOG"
+check "themes use their structured schema" grep -q -- '--structured-result recap_themes {' "$LLM_ARG_LOG"
 
 # cached mode calls no llm
 : > "$LLM_LOG"
@@ -103,6 +108,12 @@ run_recap >/dev/null 2>&1
 check "two episodes now"     test "$(wc -l < "$EPS" | tr -d ' ')" = "2"
 check "tail episode partial" test "$(tail -1 "$EPS" | jq -r '.n_steps,.partial' | tr '\n' ' ')" = "19 true "
 check_not "full episode not redone" grep -q 'thinking about topic 1$' "$LLM_LOG"
+
+cp "$EPS" "$WORK/episodes.before-failure"
+cp "$THEMES" "$WORK/themes.before-failure"
+LLM_FAIL=1 check_not "failed refresh is reported" run_recap
+check "failed refresh preserves episode cache" cmp "$WORK/episodes.before-failure" "$EPS"
+check "failed refresh preserves theme cache" cmp "$WORK/themes.before-failure" "$THEMES"
 
 # ---------------------------------------------------------------------------
 # +10 steps: partial dropped and redone as a full window; 9-step tail deferred
