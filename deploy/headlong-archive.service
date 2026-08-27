@@ -32,7 +32,7 @@ RestrictSUIDSGID=true
 LockPersonality=true
 CapabilityBoundingSet=
 AmbientCapabilities=
-ReadWritePaths=@CODEX_HOME@
+ReadWritePaths=@CODEX_HOME@ @SHELLM_HOME@/app/.assistant-authority
 
 [Install]
 WantedBy=multi-user.target

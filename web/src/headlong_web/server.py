@@ -206,6 +206,7 @@ class MemoryFailureBody(BaseModel):
         "wording_defect",
     ]
     description: str
+    downstream_event_id: str | None = None
 
     model_config = {"extra": "forbid"}
 
@@ -946,7 +947,10 @@ def create_app(
         identity = _identity_or_404(root, identity_id)
         try:
             return assistant.PersonalAssistant(root, identity).report_memory_issue(
-                body.memory_event_id, body.classification, body.description
+                body.memory_event_id,
+                body.classification,
+                body.description,
+                downstream_event_id=body.downstream_event_id,
             )
         except assistant.AssistantError as exc:
             status = 404 if "not found" in str(exc) else 422

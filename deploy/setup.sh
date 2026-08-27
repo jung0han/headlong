@@ -88,7 +88,8 @@ ENV
 fi
 
 echo "==> Installing systemd service"
-install -d -o "$SHELLM_USER" -g "$SHELLM_USER" -m 0700 "$CODEX_HOME"
+install -d -o "$SHELLM_USER" -g "$SHELLM_USER" -m 0700 \
+    "$CODEX_HOME" "$APP_DIR/.assistant-authority"
 sed -e "s|@SHELLM_HOME@|$SHELLM_HOME|g" -e "s|@CODEX_HOME@|$CODEX_HOME|g" "$SCRIPT_DIR/headlong-archive.service" \
     > /etc/systemd/system/headlong-archive.service
 sed -e "s|@SHELLM_HOME@|$SHELLM_HOME|g" -e "s|@CODEX_HOME@|$CODEX_HOME|g" "$SCRIPT_DIR/headlong-web.service" \

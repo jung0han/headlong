@@ -142,4 +142,7 @@ Production archive and unarchive requests are sent to
 `headlong-archive-boundary` over `/run/headlong-archive/archive.sock`. The
 service independently verifies signed user authority and accepts only a Codex
 Session UUID plus `archive` or `unarchive`; the web process does not execute
-Codex archive commands or edit session files directly.
+Codex archive commands or edit session files directly. It persists the signed
+attempt result before replying, so a lost socket response is reported as
+indeterminate and a retry reconciles the same attempt without repeating a
+completed mutation.

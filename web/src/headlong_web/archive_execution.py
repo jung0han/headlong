@@ -35,6 +35,17 @@ class AdapterResult:
             raise ArchiveExecutionError(f"unsupported archive adapter result: {self.state}")
 
 
+def adapter_result(event: dict[str, Any]) -> AdapterResult:
+    """Recover the bounded adapter outcome from one durable result event."""
+    result = _result(event)
+    return AdapterResult(
+        result["execution_state"],
+        error_code=result.get("error_code"),
+        message=result.get("error_message"),
+        exit_code=result.get("exit_code"),
+    )
+
+
 class ArchiveAdapter(Protocol):
     """Minimal authenticated mutation capability granted to governance."""
 
@@ -400,6 +411,53 @@ def attempt_count(events: Iterable[dict[str, Any]], authorization_event_id: str)
         if event.get("archive_attempt_schema") == ATTEMPT_SCHEMA
         and event.get("authorization_event_id") == authorization_event_id
     )
+
+
+def pending_attempt(
+    events: Iterable[dict[str, Any]],
+    *,
+    operation: str,
+    session_id: str,
+    authorization_event_id: str,
+) -> dict[str, Any] | None:
+    """Return the latest signed attempt whose durable result is still absent."""
+    operation = _operation(operation)
+    session_id = _uuid(session_id, "Codex Session id")
+    authorization_event_id = _uuid(
+        authorization_event_id, "authorization event id"
+    )
+    event_list = list(events)
+    completed = {
+        _result(event)["attempt_id"]
+        for event in event_list
+        if event.get("archive_result_schema") == RESULT_SCHEMA
+    }
+    for event in reversed(event_list):
+        if event.get("archive_attempt_schema") != ATTEMPT_SCHEMA:
+            continue
+        attempt = _attempt(event)
+        if (
+            attempt["operation"] == operation
+            and attempt["session_id"] == session_id
+            and attempt["authorization_event_id"] == authorization_event_id
+            and attempt["event_id"] not in completed
+        ):
+            return attempt
+    return None
+
+
+def result_for_attempt(
+    events: Iterable[dict[str, Any]], attempt_id: str
+) -> dict[str, Any] | None:
+    """Return a validated durable result for one signed attempt."""
+    attempt_id = _uuid(attempt_id, "attempt event id")
+    for event in reversed(list(events)):
+        if (
+            event.get("archive_result_schema") == RESULT_SCHEMA
+            and event.get("attempt_id") == attempt_id
+        ):
+            return _result(event)
+    return None
 
 
 def _attempt(value: dict[str, Any]) -> dict[str, Any]:

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -34,28 +36,44 @@ def _journal(root: Path, identity_id: str, event: dict) -> None:
     journal.append(event)
 
 
+def _request(identity_id: str) -> dict:
+    return {
+        "schema": archive_boundary.REQUEST_SCHEMA,
+        "identity_id": identity_id,
+        "authorization_event_id": AUTH_ID,
+        "operation": "archive",
+        "session_id": SESSION_ID,
+    }
+
+
+def _authorized_attempt(root: Path, identity_id: str) -> dict:
+    directive = archive_execution.directive_event(
+        "archive", SESSION_ID, event_id=AUTH_ID
+    )
+    attempt = archive_execution.attempt_event(
+        operation="archive",
+        session_id=SESSION_ID,
+        authorization_event_id=AUTH_ID,
+        candidate_id=None,
+        attempt_number=1,
+    )
+    journal = authority.AuthorityJournal(root, identity_id)
+    journal.initialize()
+    journal.append(directive)
+    journal.append(attempt)
+    return attempt
+
+
 def test_boundary_requires_matching_signed_directive_before_execution(tmp_path: Path) -> None:
     root = tmp_path / "headlong"
     root.mkdir()
     identity_id = ".identities~observer"
-    _journal(
-        root,
-        identity_id,
-        archive_execution.directive_event(
-            "archive", SESSION_ID, event_id=AUTH_ID
-        ),
-    )
+    attempt = _authorized_attempt(root, identity_id)
     executor = FakeExecutor()
 
     response = archive_boundary.handle_request(
         root,
-        {
-            "schema": archive_boundary.REQUEST_SCHEMA,
-            "identity_id": identity_id,
-            "authorization_event_id": AUTH_ID,
-            "operation": "archive",
-            "session_id": SESSION_ID,
-        },
+        _request(identity_id),
         executor=executor,
     )
 
@@ -67,6 +85,11 @@ def test_boundary_requires_matching_signed_directive_before_execution(tmp_path: 
         "exit_code": 0,
     }
     assert executor.calls == [("archive", SESSION_ID)]
+    history = archive_execution.execution_history(
+        authority.AuthorityJournal(root, identity_id).read()
+    )
+    assert history[0]["attempt_id"] == attempt["event_id"]
+    assert history[0]["execution_state"] == "succeeded"
 
 
 @pytest.mark.parametrize(
@@ -144,6 +167,14 @@ def test_client_sends_only_allowlisted_request_and_bounds_response(
     }
 
 
+def test_default_transport_deadline_covers_probe_and_execution_budget() -> None:
+    client = archive_boundary.ArchiveBoundaryClient(".identities~observer")
+
+    # Two bounded 10-second capability probes plus one 30-second command,
+    # with transport margin for durable journal I/O and scheduling.
+    assert client.timeout >= 60
+
+
 def test_boundary_accepts_only_current_candidate_acceptance_for_archive(
     tmp_path: Path,
 ) -> None:
@@ -187,6 +218,15 @@ def test_boundary_accepts_only_current_candidate_acceptance_for_archive(
     journal.initialize()
     journal.append(candidate)
     journal.append(accepted)
+    journal.append(
+        archive_execution.attempt_event(
+            operation="archive",
+            session_id=SESSION_ID,
+            authorization_event_id=accepted["event_id"],
+            candidate_id=candidate["event_id"],
+            attempt_number=1,
+        )
+    )
     executor = FakeExecutor()
     request = {
         "schema": archive_boundary.REQUEST_SCHEMA,
@@ -203,4 +243,66 @@ def test_boundary_accepts_only_current_candidate_acceptance_for_archive(
     assert archive_boundary.handle_request(root, request, executor=executor)[
         "error_code"
     ] == "unauthorized_request"
+    assert executor.calls == [("archive", SESSION_ID)]
+
+
+def test_transport_loss_reconciles_durable_attempt_without_duplicate_mutation(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "headlong"
+    root.mkdir()
+    identity_id = ".identities~observer"
+    _authorized_attempt(root, identity_id)
+    socket_path = tmp_path / "archive.sock"
+
+    class DelayedExecutor(FakeExecutor):
+        def execute(
+            self, operation: str, session_id: str
+        ) -> archive_execution.AdapterResult:
+            time.sleep(0.08)
+            return super().execute(operation, session_id)
+
+    executor = DelayedExecutor()
+
+    def one_shot() -> None:
+        archive_boundary.serve(
+            root, socket_path, executor=executor, max_requests=1
+        )
+
+    first_server = threading.Thread(target=one_shot, daemon=True)
+    first_server.start()
+    for _ in range(100):
+        if socket_path.exists():
+            break
+        time.sleep(0.002)
+    client = archive_boundary.ArchiveBoundaryClient(
+        identity_id, socket_path=socket_path, timeout=0.02
+    )
+
+    lost = client.execute("archive", SESSION_ID, AUTH_ID)
+    first_server.join(timeout=1)
+    assert not first_server.is_alive()
+
+    assert lost.state == "indeterminate"
+    assert lost.error_code == "archive_boundary_transport_lost"
+    history = archive_execution.execution_history(
+        authority.AuthorityJournal(root, identity_id).read()
+    )
+    assert history[0]["execution_state"] == "succeeded"
+    assert executor.calls == [("archive", SESSION_ID)]
+
+    socket_path.unlink(missing_ok=True)
+    second_server = threading.Thread(target=one_shot, daemon=True)
+    second_server.start()
+    for _ in range(100):
+        if socket_path.exists():
+            break
+        time.sleep(0.002)
+    reconciled = archive_boundary.ArchiveBoundaryClient(
+        identity_id, socket_path=socket_path, timeout=0.2
+    ).execute("archive", SESSION_ID, AUTH_ID)
+    second_server.join(timeout=1)
+    assert not second_server.is_alive()
+
+    assert reconciled.state == "succeeded"
     assert executor.calls == [("archive", SESSION_ID)]

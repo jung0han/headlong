@@ -61,7 +61,8 @@ fi
 # at the socket boundary rather than running Codex in the web cgroup.
 archive_unit_src="$APP_DIR/deploy/headlong-archive.service"
 if [[ -f "$archive_unit_src" ]]; then
-    sudo install -d -o shellm -g shellm -m 0700 "$CODEX_HOME"
+    sudo install -d -o shellm -g shellm -m 0700 \
+        "$CODEX_HOME" "$APP_DIR/.assistant-authority"
     archive_rendered=$(sed -e "s|@SHELLM_HOME@|$SHELLM_HOME|g" -e "s|@CODEX_HOME@|$CODEX_HOME|g" "$archive_unit_src")
     if ! printf '%s\n' "$archive_rendered" | cmp -s - /etc/systemd/system/headlong-archive.service 2>/dev/null; then
         echo "==> Installing hardened archive boundary"

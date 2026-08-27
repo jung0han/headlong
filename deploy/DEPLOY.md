@@ -215,7 +215,9 @@ memory without a review gate. Inspect, edit, forget, restore, or rebuild native
 memory through the existing memory surfaces. Add a stricter promotion rule only
 after a reproducible Memory Failure—wrong Knowledge Scope, contradiction with
 evidence, or a material degradation of a proposal or action. Duplication or
-awkward wording alone is quality feedback, not a Memory Failure.
+awkward wording alone is quality feedback, not a Memory Failure. A
+behavior-affecting report must identify the concrete downstream proposal or
+action event, whose evidence locators are retained for reproduction.
 
 Before enabling a new Observer, render and verify the shipped units without
 touching production:

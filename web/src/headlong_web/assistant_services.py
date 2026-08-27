@@ -289,14 +289,24 @@ class GovernanceService:
         candidate_id: str | None,
     ) -> None:
         events = self.ledger.events()
-        attempt = archive_execution.attempt_event(
+        attempt = archive_execution.pending_attempt(
+            events,
             operation=operation,
             session_id=session_id,
             authorization_event_id=authorization_event_id,
-            candidate_id=candidate_id,
-            attempt_number=archive_execution.attempt_count(events, authorization_event_id) + 1,
         )
-        self.ledger.append(attempt)
+        if attempt is None:
+            attempt = archive_execution.attempt_event(
+                operation=operation,
+                session_id=session_id,
+                authorization_event_id=authorization_event_id,
+                candidate_id=candidate_id,
+                attempt_number=(
+                    archive_execution.attempt_count(events, authorization_event_id)
+                    + 1
+                ),
+            )
+            self.ledger.append(attempt)
         latest = archive_execution.latest_session_execution(events, session_id)
         if (
             latest is not None
@@ -318,7 +328,16 @@ class GovernanceService:
                     error_code="adapter_failed",
                     message=(str(exc).strip() or "Archive adapter failed.")[:500],
                 )
-        self.ledger.append(archive_execution.result_event(attempt, result))
+        durable = archive_execution.result_for_attempt(
+            self.ledger.events(), attempt["event_id"]
+        )
+        if durable is not None:
+            return
+        if not (
+            result.state == "indeterminate"
+            and result.error_code == "archive_boundary_transport_lost"
+        ):
+            self.ledger.append(archive_execution.result_event(attempt, result))
 
     def shadow_report(self) -> dict[str, Any]:
         try:
