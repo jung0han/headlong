@@ -41,12 +41,17 @@ set -o pipefail
 # before entering either source cycle, using the same direct + shellm route.
 "$APP_DIR/tools/headlong-model-probe"
 
+assistant_bin="$APP_DIR/web/.venv/bin/headlong-assistant"
+if [[ ! -x "$assistant_bin" ]]; then
+    assistant_bin="$APP_DIR/tools/headlong-assistant"
+fi
+
 case "$BRIDGE" in
     codex)
-        exec "$APP_DIR/tools/headlong-assistant" --identity "$IDENT" run-codex-bridge
+        exec "$assistant_bin" --identity "$IDENT" run-codex-bridge
         ;;
     web)
-        exec "$APP_DIR/tools/headlong-assistant" --identity "$IDENT" run-web-bridge
+        exec "$assistant_bin" --identity "$IDENT" run-web-bridge
         ;;
     *)
         echo "error: unknown bridge: $BRIDGE (want codex|web)" >&2

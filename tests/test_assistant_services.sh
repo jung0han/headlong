@@ -59,6 +59,16 @@ check "Codex wrapper invokes continuous public command" \
     grep -q '^--identity observer run-codex-bridge|openai|deepseek-test-route|identity-secret$' "$SMOKE_RECORD"
 check "Web wrapper invokes continuous public command" \
     grep -q '^--identity observer run-web-bridge|openai|deepseek-test-route|identity-secret$' "$SMOKE_RECORD"
+
+mkdir -p "$APP/web/.venv/bin"
+cat >"$APP/web/.venv/bin/headlong-assistant" <<'EOF'
+#!/usr/bin/env bash
+printf 'venv:%s\n' "$*" >>"$SMOKE_RECORD"
+EOF
+chmod +x "$APP/web/.venv/bin/headlong-assistant"
+bash "$APP/deploy/assistant-service.sh" "$APP" observer codex >/dev/null 2>"$WORK/codex-venv.err"
+check "assistant service uses the synchronized web venv executable" \
+    grep -q '^venv:--identity observer run-codex-bridge$' "$SMOKE_RECORD"
 check "Codex failure restarts only its supervised component" \
     grep -q '^Restart=on-failure$' "$REPO/deploy/headlong-assistant-codex@.service"
 check "Web failure restarts only its supervised component" \
@@ -157,6 +167,12 @@ check "update preserves the archive result journal allowlist" \
     grep -q '"$CODEX_HOME" "$APP_DIR/.assistant-authority"' "$REPO/deploy/update.sh"
 check "update installs a missing archive child-process sandbox" \
     grep -q 'bubblewrap' "$REPO/deploy/update.sh"
+check "update synchronizes the web venv before hardened services start" \
+    bash -c '
+        sync_line=$(grep -n "cd .*APP_DIR/web.*uv sync" "$1" | head -1 | cut -d: -f1)
+        archive_line=$(grep -n "archive_unit_src=" "$1" | head -1 | cut -d: -f1)
+        [[ -n "$sync_line" && -n "$archive_line" && "$sync_line" -lt "$archive_line" ]]
+    ' _ "$REPO/deploy/update.sh"
 
 LEGACY_HOME="$WORK/legacy-user"
 COPIED_BIN="$WORK/copied-bin"
@@ -177,6 +193,20 @@ if HOME="$LEGACY_HOME" PATH="$COPIED_BIN:$PATH" WRAPPER_RECORD="$WORK/wrapper-re
     ok "copied archive boundary falls back to the legacy-only state home"
 else
     bad "copied archive boundary falls back to the legacy-only state home"
+fi
+mkdir -p "$RECORDED_APP/web/.venv/bin"
+cat >"$RECORDED_APP/web/.venv/bin/headlong-archive-boundary" <<'EOF'
+#!/usr/bin/env bash
+printf 'venv:%s\n' "$*" >"$WRAPPER_RECORD"
+EOF
+chmod +x "$RECORDED_APP/web/.venv/bin/headlong-archive-boundary"
+if HOME="$LEGACY_HOME" PATH="$COPIED_BIN:$PATH" WRAPPER_RECORD="$WORK/wrapper-record" \
+    env -u HEADLONG_HOME -u SHELLM_HOME \
+    "$COPIED_BIN/headlong-archive-boundary" --help >/dev/null 2>&1 \
+    && grep -q '^venv:--help$' "$WORK/wrapper-record"; then
+    ok "archive boundary uses the synchronized web venv executable"
+else
+    bad "archive boundary uses the synchronized web venv executable"
 fi
 check "update restarts only active source bridge instances" \
     grep -q "try-restart 'headlong-assistant-codex@\*.service'" "$REPO/deploy/update.sh"

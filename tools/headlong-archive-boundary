@@ -19,5 +19,8 @@ if [[ ! -d "$REPO_ROOT/web" ]]; then
     else echo "headlong-archive-boundary: can't find the HeadLong checkout" >&2; exit 1
     fi
 fi
+if [[ -x "$REPO_ROOT/web/.venv/bin/headlong-archive-boundary" ]]; then
+    exec "$REPO_ROOT/web/.venv/bin/headlong-archive-boundary" "$@"
+fi
 command -v uv >/dev/null 2>&1 || { echo "headlong-archive-boundary: uv is required" >&2; exit 1; }
 exec uv run --project "$REPO_ROOT/web" headlong-archive-boundary "$@"

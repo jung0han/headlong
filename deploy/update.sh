@@ -19,6 +19,12 @@ fi
 echo "==> Pulling latest"
 sudo -u shellm git -C "$APP_DIR" pull --ff-only
 
+# Hardened services cannot mutate the app tree or shellm's uv cache. Resolve
+# and install the web environment before starting them, then let their launch
+# paths execute the synchronized console scripts directly.
+echo "==> Synchronizing web environment"
+sudo -u shellm bash -c "export PATH=\"\$HOME/.local/bin:\$PATH\"; cd '$APP_DIR/web' && uv sync"
+
 # The headlong rename moved every unit from shelly-* to headlong-*. That
 # cutover restarts the identity dispatchers, so it must never happen as a
 # side effect of a routine deploy — least of all from the dash's self-update
