@@ -84,28 +84,6 @@ class ModelGateway:
             )
         return output
 
-    def complete_json(
-        self,
-        prompt: str,
-        *,
-        system: str,
-        token_timeout: int,
-        operation: str,
-    ) -> dict[str, Any]:
-        output = self.complete_text(
-            prompt,
-            system=system,
-            token_timeout=token_timeout,
-            operation=operation,
-        )
-        try:
-            value = json.loads(output)
-        except json.JSONDecodeError as exc:
-            raise ModelGatewayError(f"{operation} returned invalid JSON") from exc
-        if not isinstance(value, dict):
-            raise ModelGatewayError(f"{operation} JSON must be an object")
-        return value
-
     def complete_structured(
         self,
         prompt: str,

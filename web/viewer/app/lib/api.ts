@@ -240,15 +240,6 @@ export function fetchArchiveCandidates(
   );
 }
 
-export function fetchArchiveCandidate(
-  identityId: string,
-  candidateId: string
-): Promise<ArchiveCandidate> {
-  return getJson(
-    `/api/identities/${encodeURIComponent(identityId)}/archive-candidates/${encodeURIComponent(candidateId)}`
-  );
-}
-
 export function fetchArchiveCandidateEvidence(
   identityId: string,
   candidateId: string,
