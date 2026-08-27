@@ -15,6 +15,8 @@ REPO="$(dirname "$HERE")"
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
+mkdir -p "$WORK/tmp"
+export TMPDIR="$WORK/tmp"
 
 pass=0
 fail=0
@@ -31,6 +33,7 @@ check_not() { local label="$1"; shift; if "$@" >/dev/null 2>&1; then bad "$label
 mkdir -p "$WORK/bin"
 cat > "$WORK/bin/curl" <<'EOF'
 #!/usr/bin/env bash
+printf '%s\n' "$@" >> "$CURL_ARGS_FILE"
 n=$(( $(cat "$CURL_COUNT" 2>/dev/null || echo 0) + 1 ))
 printf '%s' "$n" > "$CURL_COUNT"
 mode=$(sed -n "${n}p" "$CURL_MODE_FILE")
@@ -41,6 +44,11 @@ out_file=""
 prev=""
 for a in "$@"; do
     [[ "$prev" == "-o" ]] && out_file="$a"
+    if [[ "$prev" == "--config" ]]; then
+        cp "$a" "$CURL_CONFIG_COPY"
+        stat -c '%a' "$a" > "$CURL_CONFIG_MODE" 2>/dev/null \
+            || stat -f '%Lp' "$a" > "$CURL_CONFIG_MODE"
+    fi
     prev="$a"
 done
 
@@ -132,6 +140,8 @@ export OPENROUTER_API_KEY="test-key"
 export HEADLONG_HOME="$WORK/home"   # bin/llm writes run/llm_health.json here
 mkdir -p "$HEADLONG_HOME"
 export CURL_COUNT="$WORK/count" CURL_MODE_FILE="$WORK/modes"
+export CURL_ARGS_FILE="$WORK/curl-args" CURL_CONFIG_COPY="$WORK/curl-config"
+export CURL_CONFIG_MODE="$WORK/curl-config-mode"
 export LLM_RETRY_BACKOFF=0
 
 LLM="$REPO/bin/llm"
@@ -151,6 +161,9 @@ check "stream retry succeeds"      test "$?" -eq 0
 check "stream output correct"      test "$out" = "ok"
 check "three curl calls"           test "$(calls)" = "3"
 check "retry noted on stderr"      grep -q "transient API failure (attempt 1/3)" "$WORK/stderr"
+check_not "provider key stays out of curl argv" grep -qF "$OPENROUTER_API_KEY" "$CURL_ARGS_FILE"
+check "provider key reaches curl through its config" grep -qF "Authorization: Bearer $OPENROUTER_API_KEY" "$CURL_CONFIG_COPY"
+check "curl header config is owner-only" test "$(cat "$CURL_CONFIG_MODE")" = 600
 
 # ---------------------------------------------------------------------------
 # Streaming: persistent failure -> exhausts retries, fails with orig message
