@@ -9,6 +9,8 @@ This keeps completion inference advisory while allowing reversible archival.
 Production execution crosses a separately hardened Unix-socket boundary. That
 service accepts only `archive` or `unarchive` plus a Codex Session UUID and a
 signed authorization event id, independently verifies the current authority,
-and alone receives write access to `CODEX_HOME`. The web process and Observer
-bridges retain read-only Codex access; the native thinker cannot reach the
-socket.
+and retains signing access to the Authority Journal. It invokes the external
+Codex process inside a separate Linux mount namespace where only `CODEX_HOME`
+is writable and the Authority Journal is masked with mode `000`; Codex cannot
+read or forge authority records. The web process and Observer bridges retain
+read-only Codex access; the native thinker cannot reach the socket.

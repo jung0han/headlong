@@ -16,9 +16,12 @@ from headlong_web.server import create_app
 ROOT_TRAJ = "aaaaaaaa-1111-4111-8111-111111111111"
 MEMORY_EVENT_ID = "bbbbbbbb-2222-4222-8222-222222222222"
 DOWNSTREAM_EVENT_ID = "cccccccc-3333-4333-8333-333333333333"
-DOWNSTREAM_LOCATOR = {
-    "kind": "activity_ledger_event",
-    "event_id": "dddddddd-4444-4444-8444-444444444444",
+UNRELATED_ACTION_ID = "dddddddd-4444-4444-8444-444444444444"
+PROPOSAL_EVENT_ID = "eeeeeeee-5555-4555-8555-555555555555"
+PROPOSAL_LOCATOR = {
+    "schema": "headlong.evidence-locator/v1",
+    "kind": "codex_event",
+    "source_identity": "ffffffff-6666-4666-8666-666666666666",
 }
 
 
@@ -41,16 +44,22 @@ def _assistant(tmp_path: Path) -> PersonalAssistant:
         "evidence_locators": [{"kind": "activity_ledger_event", "event_id": ROOT_TRAJ}],
         "content": "A learned project decision.",
     }
+    unrelated_action = {
+        "type": "action",
+        "step_id": UNRELATED_ACTION_ID,
+        "source": "inner_monologue",
+        "content": "An action recorded before the memory existed.",
+    }
     downstream = {
         "type": "action",
         "step_id": DOWNSTREAM_EVENT_ID,
-        "event_id": DOWNSTREAM_EVENT_ID,
-        "source_kind": "assistant_observation",
-        "evidence_locators": [DOWNSTREAM_LOCATOR],
-        "content": "A concrete proposal produced from the stale memory.",
+        "source": "inner_monologue",
+        "content": "Act on the stale project decision.",
     }
     (trajectory / "trajectory.jsonl").write_text(
         json.dumps({"type": "trajectory", "step_id": ROOT_TRAJ})
+        + "\n"
+        + json.dumps(unrelated_action)
         + "\n"
         + json.dumps(memory)
         + "\n"
@@ -73,7 +82,7 @@ def test_public_operation_records_each_domain_memory_failure(
         MEMORY_EVENT_ID,
         classification,
         f"Observed {classification.replace('_', ' ')} impact.",
-        downstream_event_id=(
+        downstream_step_id=(
             DOWNSTREAM_EVENT_ID if classification == "behavior_affecting" else None
         ),
     )
@@ -87,9 +96,24 @@ def test_public_operation_records_each_domain_memory_failure(
     }
     assert assistant.memory_failure_health()["by_classification"][classification] == 1
     if classification == "behavior_affecting":
-        assert reported["downstream_event_id"] == DOWNSTREAM_EVENT_ID
+        assert reported["downstream_event_id"] is None
         assert reported["downstream_event_type"] == "action"
-        assert reported["downstream_evidence_locators"] == [DOWNSTREAM_LOCATOR]
+        assert reported["downstream_step_id"] == DOWNSTREAM_EVENT_ID
+        snapshot = reported["downstream_action_snapshot"]
+        assert {key: snapshot[key] for key in ("type", "step_id", "source", "content")} == {
+            "type": "action",
+            "step_id": DOWNSTREAM_EVENT_ID,
+            "source": "inner_monologue",
+            "content": "Act on the stale project decision.",
+        }
+        assert len(snapshot["content_sha256"]) == 64
+        locator = reported["downstream_evidence_locators"][0]
+        assert locator["schema"] == "headlong.evidence-locator/v1"
+        assert locator["kind"] == "trajectory_step"
+        assert locator["source_identity"] == ".identities~observer"
+        assert locator["trajectory_id"] == ROOT_TRAJ
+        assert locator["step_id"] == DOWNSTREAM_EVENT_ID
+        assert len(locator["sha256"]) == 64
 
 
 def test_behavior_affecting_requires_reproducible_downstream_event(
@@ -105,6 +129,48 @@ def test_behavior_affecting_requires_reproducible_downstream_event(
             "behavior_affecting",
             "The memory changed downstream behavior.",
         )
+
+
+def test_behavior_affecting_rejects_an_action_that_precedes_the_memory(
+    tmp_path: Path,
+) -> None:
+    assistant = _assistant(tmp_path)
+
+    with pytest.raises(AssistantError, match="must follow the Active Memory"):
+        assistant.report_memory_issue(
+            MEMORY_EVENT_ID,
+            "behavior_affecting",
+            "An earlier action cannot be an effect of later memory.",
+            downstream_step_id=UNRELATED_ACTION_ID,
+        )
+
+
+def test_behavior_affecting_still_accepts_a_proposal_event_with_evidence(
+    tmp_path: Path,
+) -> None:
+    assistant = _assistant(tmp_path)
+    assistant._ledger.append(
+        {
+            "type": "work-improvement-proposal",
+            "step_id": PROPOSAL_EVENT_ID,
+            "event_id": PROPOSAL_EVENT_ID,
+            "evidence_locators": [PROPOSAL_LOCATOR],
+            "content": "A concrete downstream proposal.",
+        }
+    )
+
+    reported = assistant.report_memory_issue(
+        MEMORY_EVENT_ID,
+        "behavior_affecting",
+        "The stale memory changed a proposal.",
+        downstream_event_id=PROPOSAL_EVENT_ID,
+    )
+
+    assert reported["downstream_event_id"] == PROPOSAL_EVENT_ID
+    assert reported["downstream_event_type"] == "work-improvement-proposal"
+    assert reported["downstream_evidence_locators"] == [PROPOSAL_LOCATOR]
+    assert reported["downstream_step_id"] is None
+    assert reported["downstream_action_snapshot"] is None
 
 
 @pytest.mark.parametrize("classification", ["duplicate", "wording_defect"])
@@ -136,15 +202,18 @@ def test_api_exposes_bounded_memory_failure_inspection(tmp_path: Path) -> None:
             "memory_event_id": MEMORY_EVENT_ID,
             "classification": "behavior_affecting",
             "description": "The stale memory produced a downstream proposal.",
-            "downstream_event_id": DOWNSTREAM_EVENT_ID,
+            "downstream_step_id": DOWNSTREAM_EVENT_ID,
         },
     )
     listed = client.get(base)
     health = client.get(f"{base}/health")
 
     assert created.status_code == 200
-    assert created.json()["downstream_event_id"] == DOWNSTREAM_EVENT_ID
-    assert created.json()["downstream_evidence_locators"] == [DOWNSTREAM_LOCATOR]
+    assert created.json()["downstream_event_id"] is None
+    assert created.json()["downstream_step_id"] == DOWNSTREAM_EVENT_ID
+    assert created.json()["downstream_action_snapshot"]["content"] == (
+        "Act on the stale project decision."
+    )
     assert len(listed.json()) == 1
     assert health.json()["total"] == 1
     assert "content" not in health.json()
@@ -164,7 +233,7 @@ def test_cli_reports_and_lists_memory_failures(tmp_path: Path, capsys) -> None:
             "behavior_affecting",
             "--description",
             "A proposal acted on stale memory.",
-            "--downstream-event-id",
+            "--downstream-step-id",
             DOWNSTREAM_EVENT_ID,
         ]
     ) == 0
@@ -173,8 +242,9 @@ def test_cli_reports_and_lists_memory_failures(tmp_path: Path, capsys) -> None:
     listed = json.loads(capsys.readouterr().out)
 
     assert created["classification"] == "behavior_affecting"
-    assert created["downstream_event_id"] == DOWNSTREAM_EVENT_ID
+    assert created["downstream_event_id"] is None
+    assert created["downstream_step_id"] == DOWNSTREAM_EVENT_ID
     assert len(listed["memory_failures"]) == 1
-    assert listed["memory_failures"][0]["downstream_evidence_locators"] == [
-        DOWNSTREAM_LOCATOR
-    ]
+    assert listed["memory_failures"][0]["downstream_evidence_locators"][0][
+        "kind"
+    ] == "trajectory_step"

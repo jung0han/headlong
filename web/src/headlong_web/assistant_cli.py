@@ -119,7 +119,13 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
     )
     report_failure.add_argument("--description", required=True)
-    report_failure.add_argument("--downstream-event-id")
+    downstream = report_failure.add_mutually_exclusive_group()
+    downstream.add_argument(
+        "--downstream-event-id", help="downstream Proposal event id"
+    )
+    downstream.add_argument(
+        "--downstream-step-id", help="downstream native action step id"
+    )
 
     archive_candidate = commands.add_parser(
         "archive-candidate", help="inspect and review Codex Archive Candidates"
@@ -348,6 +354,7 @@ def run(
                     args.classification,
                     args.description,
                     downstream_event_id=args.downstream_event_id,
+                    downstream_step_id=args.downstream_step_id,
                 )
         elif args.command == "archive-candidate":
             if args.archive_candidate_command == "list":

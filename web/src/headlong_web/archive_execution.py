@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterable, Protocol
 
 ATTEMPT_SCHEMA = "headlong.codex-archive-attempt/v1"
@@ -79,6 +80,87 @@ class SubprocessCommandExecutor:
     def run(self, command: tuple[str, ...], *, timeout: float) -> CommandResult:
         completed = subprocess.run(
             command,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        return CommandResult(completed.returncode, completed.stdout, completed.stderr)
+
+
+class SandboxedCodexCommandExecutor:
+    """Run the fixed Codex archive contract in a child mount namespace."""
+
+    def __init__(
+        self,
+        *,
+        codex_home: Path,
+        authority_dir: Path,
+        bubblewrap: str | None = None,
+    ):
+        self.codex_home = codex_home.resolve()
+        self.authority_dir = authority_dir.resolve()
+        self.bubblewrap = (
+            "/usr/bin/bwrap" if bubblewrap is None else bubblewrap
+        )
+
+    def run(self, command: tuple[str, ...], *, timeout: float) -> CommandResult:
+        if len(command) != 3 or Path(command[0]).name != "codex":
+            raise OSError("sandbox accepts only the fixed Codex archive contract")
+        operation = _operation(command[1])
+        target = command[2]
+        if target != "--help":
+            target = _uuid(target, "Codex Session id")
+        if not Path(self.bubblewrap).is_file():
+            raise OSError("bubblewrap is required for Codex archive isolation")
+        if not self.codex_home.is_dir() or not self.authority_dir.is_dir():
+            raise OSError("Codex archive isolation paths are unavailable")
+        sandboxed = (
+            self.bubblewrap,
+            "--die-with-parent",
+            "--new-session",
+            "--unshare-pid",
+            "--unshare-ipc",
+            "--unshare-uts",
+            "--unshare-net",
+            "--unshare-cgroup-try",
+            "--ro-bind",
+            "/",
+            "/",
+            "--bind",
+            str(self.codex_home),
+            str(self.codex_home),
+            "--tmpfs",
+            str(self.authority_dir),
+            "--chmod",
+            "000",
+            str(self.authority_dir),
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+            "--clearenv",
+            "--setenv",
+            "HOME",
+            str(self.codex_home),
+            "--setenv",
+            "CODEX_HOME",
+            str(self.codex_home),
+            "--setenv",
+            "HEADLONG_AUTHORITY_DIR",
+            str(self.authority_dir),
+            "--setenv",
+            "PATH",
+            "/usr/local/bin:/usr/bin:/bin",
+            "--chdir",
+            str(self.codex_home),
+            "--",
+            str(Path(command[0]).resolve()),
+            operation,
+            target,
+        )
+        completed = subprocess.run(
+            sandboxed,
             capture_output=True,
             text=True,
             timeout=timeout,

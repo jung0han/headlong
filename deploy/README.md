@@ -5,7 +5,9 @@ the thinkers, bridges, and dashboard, the `setup.sh` and `update.sh`
 scripts, terraform for the AWS infrastructure, and the operational
 scripts in `scripts/` (pulling the box's commits, usage, and metrics).
 `headlong-archive.service` is the separately hardened, archive-only Codex
-capability used by the dashboard and Personal Assistant bridges.
+capability used by the dashboard and Personal Assistant bridges. Its trusted
+boundary signs results, while external Codex runs in a bubblewrap child mount
+namespace with no Authority Journal access.
 
 Two things live side by side here. The reusable parts are `terraform/`,
 `setup.sh`, `update.sh`, the systemd units, and [DEPLOY.md](DEPLOY.md),

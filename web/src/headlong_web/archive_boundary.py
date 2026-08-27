@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import socket
 from pathlib import Path
 from typing import Any
@@ -286,7 +287,7 @@ def serve(
 ) -> None:
     socket_path.parent.mkdir(parents=True, exist_ok=True)
     socket_path.unlink(missing_ok=True)
-    adapter = executor or archive_execution.CodexArchiveAdapter()
+    adapter = executor or _sandboxed_codex_adapter(root)
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
         server.bind(str(socket_path))
         os.chmod(socket_path, 0o600)
@@ -314,6 +315,17 @@ def serve(
                 except (BrokenPipeError, ConnectionResetError, OSError):
                     pass
             handled += 1
+
+
+def _sandboxed_codex_adapter(root: Path) -> archive_execution.CodexArchiveAdapter:
+    codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    return archive_execution.CodexArchiveAdapter(
+        executor=archive_execution.SandboxedCodexCommandExecutor(
+            codex_home=codex_home,
+            authority_dir=root / ".assistant-authority",
+        ),
+        binary=shutil.which("codex"),
+    )
 
 
 def main() -> None:

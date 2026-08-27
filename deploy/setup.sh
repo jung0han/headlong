@@ -35,7 +35,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "==> Installing system packages"
 apt-get update -qq
-apt-get install -y -qq git jq curl unzip
+apt-get install -y -qq git jq curl unzip bubblewrap
 
 # Real Node is required for the frontend build: without it, bun shims
 # `node` with itself and react-router's build crashes on react-dom's

@@ -11,6 +11,11 @@ set -euo pipefail
 APP_DIR="${APP_DIR:-/opt/shellm/app}"
 UNIT_DST="${UNIT_DST:-/etc/systemd/system/headlong-web.service}"
 
+if [[ ! -x /usr/bin/bwrap ]]; then
+    echo "==> Installing bubblewrap for archive child-process isolation"
+    sudo apt-get install -y -qq bubblewrap
+fi
+
 echo "==> Pulling latest"
 sudo -u shellm git -C "$APP_DIR" pull --ff-only
 
