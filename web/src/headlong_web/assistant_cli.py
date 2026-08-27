@@ -36,7 +36,11 @@ def build_parser() -> argparse.ArgumentParser:
     web_add = web_commands.add_parser("add")
     web_add.add_argument("url")
     web_add.add_argument("--name")
+    web_add.add_argument(
+        "--kind", choices=("url", "rss", "documentation"), default="url"
+    )
     web_commands.add_parser("list")
+    web_commands.add_parser("health")
     web_remove = web_commands.add_parser("remove")
     web_remove.add_argument("selector")
 
@@ -83,9 +87,13 @@ def run(argv: list[str] | None = None) -> int:
                 result = {"projects": [project.to_dict() for project in assistant.projects()]}
         elif args.command == "web-source":
             if args.web_source_command == "add":
-                result = assistant.add_web_source(args.url, args.name).to_dict()
+                result = assistant.add_web_source(
+                    args.url, args.name, args.kind
+                ).to_dict()
             elif args.web_source_command == "remove":
                 result = assistant.remove_web_source(args.selector).to_dict()
+            elif args.web_source_command == "health":
+                result = {"web_sources": assistant.web_source_health()}
             else:
                 result = {
                     "web_sources": [source.to_dict() for source in assistant.web_sources()]

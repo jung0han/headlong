@@ -557,6 +557,14 @@ def create_app(
         except assistant.AssistantError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+    @app.get("/api/identities/{identity_id}/web-sources/health")
+    def identity_web_source_health(identity_id: str) -> list[dict]:
+        identity = _identity_or_404(root, identity_id)
+        try:
+            return assistant.PersonalAssistant(root, identity).web_source_health()
+        except assistant.AssistantError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
     @app.get(
         "/api/identities/{identity_id}/references/{source_id}/{revision_id}"
     )
