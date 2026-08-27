@@ -48,6 +48,9 @@ LLM_THINKING_LEVEL=""
 LLM_EFFORT=""
 LLM_RAW=0
 LLM_PROMPT=""
+LLM_RESPONSE_FORMAT=""
+LLM_RESPONSE_SCHEMA_NAME=""
+LLM_RESPONSE_SCHEMA_FILE=""
 # Token usage is captured on every call. A caller that wants this call's
 # numbers sets LLM_USAGE_FILE and gets a one-line JSON record
 # ({in_tok, out_tok, think_tok}) written there after the call (bin/shellm
@@ -168,6 +171,9 @@ Options:
   --thinking [LEVEL]       Enable thinking (Anthropic: adaptive; Gemini: minimal/low/medium/high)
   --effort LEVEL           Thinking effort/provider output effort
   --raw                    Print raw non-streaming API response JSON
+  --response-schema NAME FILE
+                           Request strict JSON Schema output (OpenAI-compatible)
+  --json-object            Request JSON object output (OpenAI-compatible)
   -h, --help               Show this help
 
 Models:
@@ -259,6 +265,12 @@ while [[ $# -gt 0 ]]; do
             fi
             shift ;;
         --effort)        LLM_EFFORT="${2:?--effort requires a value}"; shift 2 ;;
+        --response-schema)
+            LLM_RESPONSE_FORMAT="json_schema"
+            LLM_RESPONSE_SCHEMA_NAME="${2:?--response-schema requires a name and file}"
+            LLM_RESPONSE_SCHEMA_FILE="${3:?--response-schema requires a name and file}"
+            shift 3 ;;
+        --json-object)    LLM_RESPONSE_FORMAT="json_object"; shift ;;
         --raw)           LLM_RAW=1; shift ;;
         -*)              die "Unknown option: $1 (try llm --help)" ;;
         *)               LLM_PROMPT="$*"; break ;;
@@ -273,6 +285,14 @@ if [[ -z "$LLM_PROMPT" && -z "$LLM_MESSAGES" ]]; then
 fi
 
 [[ -z "$LLM_PROMPT" && -z "$LLM_MESSAGES" ]] && die "No prompt or messages provided"
+
+if [[ "$LLM_RESPONSE_FORMAT" == json_schema ]]; then
+    [[ "$LLM_RESPONSE_SCHEMA_NAME" =~ ^[A-Za-z0-9_-]{1,64}$ ]] \
+        || die "Response schema name must use 1-64 letters, digits, underscores, or hyphens"
+    [[ -f "$LLM_RESPONSE_SCHEMA_FILE" ]] || die "Response schema file not found"
+    jq -e 'type == "object"' "$LLM_RESPONSE_SCHEMA_FILE" >/dev/null 2>&1 \
+        || die "Response schema file must contain one JSON object"
+fi
 
 # Default model: the system-wide SHELLM_MODEL when set (so keyless callers
 # like `mem search` follow the configured provider). Otherwise pick a default
@@ -324,6 +344,13 @@ detect_provider() {
 
 if [[ -z "$LLM_PROVIDER" ]]; then
     LLM_PROVIDER=$(detect_provider "$LLM_MODEL")
+fi
+
+if [[ -n "$LLM_RESPONSE_FORMAT" ]]; then
+    case "$LLM_PROVIDER" in
+        openai|openrouter|opencode-go) ;;
+        *) die "Structured response formats require an OpenAI-compatible route" ;;
+    esac
 fi
 
 # An environment-supplied provider reroutes every call in the process tree,
@@ -512,6 +539,16 @@ build_payload_openai() {
     # chunk (OpenAI-compatible stream_options; OpenRouter supports it too).
     if [[ "$LLM_STREAM" -eq 1 ]]; then
         jq_filter="${jq_filter} + {stream_options: {include_usage: true}}"
+    fi
+
+    if [[ "$LLM_RESPONSE_FORMAT" == json_schema ]]; then
+        jq_args+=(
+            --arg response_schema_name "$LLM_RESPONSE_SCHEMA_NAME"
+            --slurpfile response_schema "$LLM_RESPONSE_SCHEMA_FILE"
+        )
+        jq_filter="${jq_filter} + {response_format:{type:\"json_schema\",json_schema:{name:\$response_schema_name,strict:true,schema:\$response_schema[0]}}}"
+    elif [[ "$LLM_RESPONSE_FORMAT" == json_object ]]; then
+        jq_filter="${jq_filter} + {response_format:{type:\"json_object\"}}"
     fi
 
     # Map --thinking LEVEL to OpenAI reasoning.effort (only when an explicit
@@ -1091,6 +1128,11 @@ else
     _llm_note ok
 
     if [[ -n "$("check_truncated_${LLM_PROVIDER}" < "$local_resp")" ]]; then
+        if [[ -n "$LLM_RESPONSE_FORMAT" ]]; then
+            rm -f "$local_resp"
+            _llm_note error "" "structured result truncated"
+            die "structured result truncated"
+        fi
         warn_truncated
     fi
 
