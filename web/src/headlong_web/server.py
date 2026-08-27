@@ -172,6 +172,19 @@ class ProposalReviewBody(BaseModel):
     state: Literal["pending", "accepted", "rejected", "dismissed"]
 
 
+class ObservationEvaluationBody(BaseModel):
+    useful: bool
+    accurate: bool
+
+    model_config = {"extra": "forbid"}
+
+
+class ActiveMemoryEvaluationBody(BaseModel):
+    correct: bool
+
+    model_config = {"extra": "forbid"}
+
+
 class ActiveMemoryBody(BaseModel):
     content: str | None = None
     candidate_event_id: str | None = None
@@ -684,6 +697,68 @@ def create_app(
         try:
             return assistant.PersonalAssistant(root, identity).review_proposal(
                 proposal_id, body.state
+            )
+        except assistant.AssistantError as exc:
+            status = 404 if "not found" in str(exc) else 422
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+    @app.get("/api/identities/{identity_id}/assistant/shadow-gate")
+    def identity_shadow_gate(identity_id: str) -> dict:
+        identity = _identity_or_404(root, identity_id)
+        try:
+            return assistant.PersonalAssistant(root, identity).shadow_gate_report()
+        except assistant.AssistantError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.get("/api/identities/{identity_id}/assistant/shadow-gate/observations")
+    def identity_shadow_gate_observations(identity_id: str) -> list[dict]:
+        identity = _identity_or_404(root, identity_id)
+        try:
+            return assistant.PersonalAssistant(root, identity).shadow_gate_observations()
+        except assistant.AssistantError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/identities/{identity_id}/assistant/shadow-gate/observations/"
+        "{observation_event_id}/review"
+    )
+    def identity_shadow_gate_observation_review(
+        identity_id: str,
+        observation_event_id: str,
+        body: ObservationEvaluationBody,
+    ) -> dict:
+        _require_controls()
+        identity = _identity_or_404(root, identity_id)
+        try:
+            return assistant.PersonalAssistant(root, identity).review_observation(
+                observation_event_id, useful=body.useful, accurate=body.accurate
+            )
+        except assistant.AssistantError as exc:
+            status = 404 if "not found" in str(exc) else 422
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+    @app.get("/api/identities/{identity_id}/assistant/shadow-gate/active-memories")
+    def identity_shadow_gate_memories(identity_id: str) -> list[dict]:
+        identity = _identity_or_404(root, identity_id)
+        try:
+            return assistant.PersonalAssistant(root, identity).shadow_gate_memories()
+        except assistant.AssistantError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/identities/{identity_id}/assistant/shadow-gate/active-memories/"
+        "{memory_event_id}/review"
+    )
+    def identity_shadow_gate_memory_review(
+        identity_id: str,
+        memory_event_id: str,
+        body: ActiveMemoryEvaluationBody,
+    ) -> dict:
+        _require_controls()
+        identity = _identity_or_404(root, identity_id)
+        try:
+            return assistant.PersonalAssistant(root, identity).review_active_memory(
+                memory_event_id, correct=body.correct
             )
         except assistant.AssistantError as exc:
             status = 404 if "not found" in str(exc) else 422

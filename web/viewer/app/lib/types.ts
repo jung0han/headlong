@@ -247,6 +247,71 @@ export interface ImprovementProposal {
   reviewed_at: string | null;
 }
 
+export interface ShadowGateReport {
+  schema: "headlong.shadow-gate-report/v1";
+  status: "not_started" | "collecting" | "not_ready" | "ready";
+  ready: boolean;
+  shadow_started_at: string | null;
+  evaluated_at: string;
+  elapsed_seconds: number;
+  elapsed_days: number;
+  final_consolidation_count: number;
+  reviewed_observation_count: number;
+  useful_and_accurate_count: number;
+  useful_and_accurate_rate: number | null;
+  incorrect_active_memory_count: number;
+  threshold: {
+    duration_days: 7;
+    final_consolidations: 20;
+    rule: "whichever_occurs_first";
+    duration_reached: boolean;
+    final_count_reached: boolean;
+    reached: boolean;
+  };
+  criteria: {
+    minimum_useful_and_accurate_rate: 0.8;
+    quality_met: boolean;
+    requires_zero_incorrect_active_memories: true;
+    memory_safety_met: boolean;
+  };
+  authority: {
+    mode: "proposal_only";
+    external_writes_enabled: false;
+    hook_adapters_enabled: false;
+    project_mounts_enabled: false;
+  };
+}
+
+export interface ShadowGateObservation {
+  event_id: string;
+  title: string;
+  content: string;
+  source_identity: string;
+  knowledge_scope: { kind: "project"; project_id: string };
+  evidence_locators: ProposalEvidenceLocator[];
+  observed_at: string | null;
+  evaluation: {
+    event_id: string;
+    useful: boolean;
+    accurate: boolean;
+    reviewed_at: string | null;
+  } | null;
+}
+
+export interface ShadowGateMemory {
+  event_id: string;
+  memory_key: string;
+  memory_kind: "decision" | "preference" | "constraint";
+  content: string;
+  knowledge_scope: { kind: "project"; project_id: string } | { kind: "global" };
+  activated_at: string | null;
+  evaluation: {
+    event_id: string;
+    correct: boolean;
+    reviewed_at: string | null;
+  } | null;
+}
+
 export interface KillallResult {
   ok: boolean;
   dry_run: boolean;

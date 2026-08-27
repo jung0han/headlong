@@ -30,6 +30,9 @@ import type {
   TreeNode,
   ProposalReviewState,
   ImprovementProposal,
+  ShadowGateMemory,
+  ShadowGateObservation,
+  ShadowGateReport,
 } from "~/lib/types";
 
 export const API_BASE = import.meta.env.VITE_API_URL ?? "";
@@ -223,6 +226,51 @@ export function reviewProposal(
   return postJson(
     `/api/identities/${encodeURIComponent(identityId)}/proposals/${encodeURIComponent(proposalId)}/review`,
     { state }
+  );
+}
+
+export function fetchShadowGate(identityId: string): Promise<ShadowGateReport> {
+  return getJson(
+    `/api/identities/${encodeURIComponent(identityId)}/assistant/shadow-gate`
+  );
+}
+
+export function fetchShadowGateObservations(
+  identityId: string
+): Promise<ShadowGateObservation[]> {
+  return getJson(
+    `/api/identities/${encodeURIComponent(identityId)}/assistant/shadow-gate/observations`
+  );
+}
+
+export function reviewShadowGateObservation(
+  identityId: string,
+  eventId: string,
+  useful: boolean,
+  accurate: boolean
+): Promise<ShadowGateObservation> {
+  return postJson(
+    `/api/identities/${encodeURIComponent(identityId)}/assistant/shadow-gate/observations/${encodeURIComponent(eventId)}/review`,
+    { useful, accurate }
+  );
+}
+
+export function fetchShadowGateMemories(
+  identityId: string
+): Promise<ShadowGateMemory[]> {
+  return getJson(
+    `/api/identities/${encodeURIComponent(identityId)}/assistant/shadow-gate/active-memories`
+  );
+}
+
+export function reviewShadowGateMemory(
+  identityId: string,
+  eventId: string,
+  correct: boolean
+): Promise<ShadowGateMemory> {
+  return postJson(
+    `/api/identities/${encodeURIComponent(identityId)}/assistant/shadow-gate/active-memories/${encodeURIComponent(eventId)}/review`,
+    { correct }
   );
 }
 

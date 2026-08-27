@@ -31,6 +31,7 @@ from headlong_web import (
     proposals,
     references,
     retrieval,
+    shadow_gate,
     trajectory,
     web_exploration,
 )
@@ -897,6 +898,72 @@ class PersonalAssistant:
                 raise AssistantError("reviewed proposal disappeared from the ledger")
             return reviewed
 
+    def shadow_gate_report(self) -> dict[str, Any]:
+        """Return the live, ledger-derived proposal-only evaluation report."""
+        try:
+            return shadow_gate.report(self._ledger_events(), self._now())
+        except shadow_gate.ShadowGateError as exc:
+            raise AssistantError(str(exc)) from exc
+
+    def shadow_gate_observations(self) -> list[dict[str, Any]]:
+        """Return reviewable Final Consolidations and their latest judgments."""
+        try:
+            return shadow_gate.observations(self._ledger_events())
+        except shadow_gate.ShadowGateError as exc:
+            raise AssistantError(str(exc)) from exc
+
+    def review_observation(
+        self, observation_event_id: str, *, useful: bool, accurate: bool
+    ) -> dict[str, Any]:
+        """Append a human evaluation without granting any execution authority."""
+        with self._state_lock():
+            events = self._ledger_events()
+            try:
+                event = shadow_gate.observation_evaluation_event(
+                    events,
+                    observation_event_id,
+                    useful=useful,
+                    accurate=accurate,
+                    reviewed_at=self._now(),
+                )
+            except shadow_gate.ShadowGateError as exc:
+                raise AssistantError(str(exc)) from exc
+            self._append_event(event)
+            return next(
+                item
+                for item in shadow_gate.observations([*events, event])
+                if item["event_id"] == event["observation_event_id"]
+            )
+
+    def shadow_gate_memories(self) -> list[dict[str, Any]]:
+        """Return every Active Memory promotion and its latest judgment."""
+        try:
+            return shadow_gate.active_memories(self._ledger_events())
+        except shadow_gate.ShadowGateError as exc:
+            raise AssistantError(str(exc)) from exc
+
+    def review_active_memory(
+        self, memory_event_id: str, *, correct: bool
+    ) -> dict[str, Any]:
+        """Append a human evaluation of memory-promotion correctness."""
+        with self._state_lock():
+            events = self._ledger_events()
+            try:
+                event = shadow_gate.memory_evaluation_event(
+                    events,
+                    memory_event_id,
+                    correct=correct,
+                    reviewed_at=self._now(),
+                )
+            except shadow_gate.ShadowGateError as exc:
+                raise AssistantError(str(exc)) from exc
+            self._append_event(event)
+            return next(
+                item
+                for item in shadow_gate.active_memories([*events, event])
+                if item["event_id"] == event["memory_event_id"]
+            )
+
     def memory_candidates(
         self,
         project_selector: str | None = None,
@@ -1332,6 +1399,7 @@ class PersonalAssistant:
                     due_kind,
                     analysis,
                     supersedes,
+                    now,
                 )
                 self._append_event(event)
                 ledger_ids.add(event_id)
@@ -2010,6 +2078,7 @@ def analysis_event(
     analysis_kind: str,
     analysis: dict[str, Any],
     supersedes_event_ids: list[str],
+    completed_at: datetime,
 ) -> dict[str, Any]:
     """Build one validated, revision-specific analysis result."""
     return activity_event(
@@ -2032,6 +2101,7 @@ def analysis_event(
             "task_root_id": source.task_root_id,
             "parent_session_id": source.parent_session_id,
             "source_revision_digest": state["source_revision_digest"],
+            "analysis_completed_at": codex_analysis.format_time(completed_at),
             "memory_candidates": analysis["memory_candidates"],
             "improvement_signals": analysis["improvement_signals"],
         },
