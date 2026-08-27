@@ -171,6 +171,17 @@ class ProposalReviewBody(BaseModel):
     state: Literal["pending", "accepted", "rejected", "dismissed"]
 
 
+class ActiveMemoryBody(BaseModel):
+    content: str | None = None
+    candidate_event_id: str | None = None
+    memory_kind: str
+    memory_key: str
+    project_id: str | None = None
+    global_scope: bool = False
+
+    model_config = {"extra": "forbid"}
+
+
 def create_app(
     root: Path, static_dir: Path | None = None, *, read_only: bool = False
 ) -> FastAPI:
@@ -553,6 +564,81 @@ def create_app(
         if not memory_path.is_file():
             raise HTTPException(status_code=404, detail="Memory not found")
         return {"name": name, "content": memory_path.read_text(encoding="utf-8", errors="replace")}
+
+    @app.get("/api/identities/{identity_id}/active-memories")
+    def identity_active_memories(
+        identity_id: str,
+        project_id: str | None = None,
+        include_global: bool = True,
+        global_only: bool = False,
+    ) -> list[dict]:
+        identity = _identity_or_404(root, identity_id)
+        try:
+            return assistant.PersonalAssistant(root, identity).active_memories(
+                project_id,
+                include_global=include_global,
+                global_only=global_only,
+            )
+        except assistant.AssistantError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/identities/{identity_id}/memory-candidates")
+    def identity_memory_candidates(
+        identity_id: str,
+        project_id: str | None = None,
+        include_global: bool = True,
+        global_only: bool = False,
+    ) -> list[dict]:
+        identity = _identity_or_404(root, identity_id)
+        try:
+            return assistant.PersonalAssistant(root, identity).memory_candidates(
+                project_id,
+                include_global=include_global,
+                global_only=global_only,
+            )
+        except assistant.AssistantError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/identities/{identity_id}/active-memories")
+    def identity_activate_memory(identity_id: str, body: ActiveMemoryBody) -> dict:
+        _require_controls()
+        identity = _identity_or_404(root, identity_id)
+        service = assistant.PersonalAssistant(root, identity)
+        try:
+            if (body.content is None) == (body.candidate_event_id is None):
+                raise assistant.AssistantError(
+                    "provide exactly one of content or candidate_event_id"
+                )
+            if not body.global_scope and body.project_id is None:
+                raise assistant.AssistantError(
+                    "dashboard activation requires project_id or explicit global_scope"
+                )
+            if body.candidate_event_id is not None:
+                return service.accept_memory_candidate(
+                    body.candidate_event_id,
+                    memory_kind=body.memory_kind,
+                    memory_key=body.memory_key,
+                    project_selector=body.project_id,
+                    global_scope=body.global_scope,
+                )
+            return service.remember_memory(
+                body.content or "",
+                memory_kind=body.memory_kind,
+                memory_key=body.memory_key,
+                project_selector=body.project_id,
+                global_scope=body.global_scope,
+            )
+        except assistant.AssistantError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/identities/{identity_id}/active-memories/rebuild")
+    def identity_rebuild_active_memories(identity_id: str) -> dict:
+        _require_controls()
+        identity = _identity_or_404(root, identity_id)
+        try:
+            return assistant.PersonalAssistant(root, identity).rebuild_active_memory()
+        except assistant.AssistantError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @app.get("/api/identities/{identity_id}/references")
     def identity_references(identity_id: str) -> list[dict]:

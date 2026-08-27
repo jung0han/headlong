@@ -22,6 +22,7 @@ from typing import Any, Callable, Iterator
 from urllib.parse import urlsplit
 
 from headlong_web import (
+    active_memory,
     codex_analysis,
     control,
     discovery,
@@ -49,6 +50,7 @@ WEB_SOURCE_KINDS = {"url", "rss", "documentation"}
 _EVENT_NAMESPACE = uuid.UUID("88d66cf8-0918-4593-974e-71e544b6fd5b")
 _MAX_TITLE = 160
 _MAX_OBSERVATION = 1200
+_MAX_MEMORY_KEY = 120
 
 
 class AssistantError(RuntimeError):
@@ -615,6 +617,145 @@ class PersonalAssistant:
                 raise AssistantError("reviewed proposal disappeared from the ledger")
             return reviewed
 
+    def memory_candidates(
+        self,
+        project_selector: str | None = None,
+        *,
+        global_only: bool = False,
+        include_global: bool = True,
+    ) -> list[dict[str, Any]]:
+        """List unpromoted model inferences through a scope-filtered boundary."""
+        project_id = (
+            self._resolve_project(project_selector).id if project_selector else None
+        )
+        try:
+            return active_memory.select_scope(
+                active_memory.candidate_records(self._ledger_events()),
+                project_id=project_id,
+                global_only=global_only,
+                include_global=include_global,
+            )
+        except active_memory.ActiveMemoryError as exc:
+            raise AssistantError(str(exc)) from exc
+
+    def active_memories(
+        self,
+        project_selector: str | None = None,
+        *,
+        global_only: bool = False,
+        include_global: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Read the replaceable Active Memory projection with scope isolation."""
+        project_id = (
+            self._resolve_project(project_selector).id if project_selector else None
+        )
+        try:
+            return active_memory.select_scope(
+                active_memory.read_projection(self.identity.path),
+                project_id=project_id,
+                global_only=global_only,
+                include_global=include_global,
+            )
+        except active_memory.ActiveMemoryError as exc:
+            raise AssistantError(str(exc)) from exc
+
+    def remember_memory(
+        self,
+        content: str,
+        *,
+        memory_kind: str,
+        memory_key: str,
+        project_selector: str | None = None,
+        global_scope: bool = False,
+        current_path: Path | None = None,
+    ) -> dict[str, Any]:
+        """Record one explicit user statement and refresh the derived view."""
+        self._validate_memory_input(content, memory_kind, memory_key)
+        if global_scope and project_selector is not None:
+            raise AssistantError("choose project or global scope, not both")
+        if global_scope:
+            scope = {"kind": "global"}
+        else:
+            project = (
+                self._resolve_project(project_selector)
+                if project_selector
+                else self._project_for_current_path(current_path or Path.cwd())
+            )
+            scope = {"kind": "project", "project_id": project.id}
+        with self._state_lock():
+            event = self._activation_event(
+                content=content,
+                memory_kind=memory_kind,
+                memory_key=memory_key,
+                knowledge_scope=scope,
+                authority_basis="explicit_user_statement",
+                evidence_locators=[],
+                causal_event_ids=[],
+                additionally_supersedes=[],
+            )
+            self._append_event(event)
+            self._rebuild_active_memory_unlocked()
+        return event
+
+    def accept_memory_candidate(
+        self,
+        candidate_event_id: str,
+        *,
+        memory_kind: str,
+        memory_key: str,
+        project_selector: str | None = None,
+        global_scope: bool = False,
+    ) -> dict[str, Any]:
+        """Record an explicit review accepting one current Memory Candidate."""
+        self._validate_memory_input("accepted candidate", memory_kind, memory_key)
+        if global_scope and project_selector is not None:
+            raise AssistantError("choose project or global scope, not both")
+        with self._state_lock():
+            events = self._ledger_events()
+            try:
+                candidates = active_memory.candidate_records(events)
+            except active_memory.ActiveMemoryError as exc:
+                raise AssistantError(str(exc)) from exc
+            candidate = next(
+                (item for item in candidates if item["event_id"] == candidate_event_id),
+                None,
+            )
+            if candidate is None:
+                raise AssistantError("current Memory Candidate not found")
+            if global_scope:
+                scope = {"kind": "global"}
+            elif project_selector:
+                scope = {
+                    "kind": "project",
+                    "project_id": self._resolve_project(project_selector).id,
+                }
+                if scope != candidate["knowledge_scope"]:
+                    raise AssistantError(
+                        "a project Memory Candidate cannot activate in another project"
+                    )
+            else:
+                scope = candidate["knowledge_scope"]
+            event = self._activation_event(
+                content=candidate["content"],
+                memory_kind=memory_kind,
+                memory_key=memory_key,
+                knowledge_scope=scope,
+                authority_basis="user_accepted_candidate",
+                evidence_locators=candidate["evidence_locators"],
+                causal_event_ids=[candidate_event_id],
+                additionally_supersedes=[candidate_event_id],
+                events=events,
+            )
+            self._append_event(event)
+            self._rebuild_active_memory_unlocked()
+        return event
+
+    def rebuild_active_memory(self) -> dict[str, int]:
+        """Delete no history; deterministically reproduce the current flat view."""
+        with self._state_lock():
+            records = self._rebuild_active_memory_unlocked()
+        return {"active": len(records)}
+
     def follow_codex_once(
         self, active_root: Path, archived_root: Path
     ) -> dict[str, Any]:
@@ -755,6 +896,16 @@ class PersonalAssistant:
                 )
                 marker_key = f"{due_kind}_event_id"
                 if state.get(marker_key) or event_id in ledger_ids:
+                    existing = next(
+                        (
+                            item
+                            for item in self._ledger_events()
+                            if item.get("event_id") == event_id
+                        ),
+                        None,
+                    )
+                    if existing is not None:
+                        self._materialize_memory_candidates(existing, ledger_ids)
                     state[marker_key] = event_id
                     state["status"] = due_kind
                     self._write_codex_analysis_state(source.id, state)
@@ -808,6 +959,7 @@ class PersonalAssistant:
                 )
                 self._append_event(event)
                 ledger_ids.add(event_id)
+                self._materialize_memory_candidates(event, ledger_ids)
                 state[marker_key] = event_id
                 state["latest_success_event_id"] = event_id
                 state["status"] = due_kind
@@ -1113,6 +1265,133 @@ class PersonalAssistant:
                 ledger_ids.add(event["event_id"])
                 created += 1
         return created
+
+    def _materialize_memory_candidates(
+        self, analysis: dict[str, Any], ledger_ids: set[str]
+    ) -> None:
+        """Repairably split validated 909 findings into authority-aware events."""
+        candidates = analysis.get("memory_candidates", [])
+        if not isinstance(candidates, list):
+            raise AssistantError("analysis Memory Candidates are invalid")
+        for index, candidate in enumerate(candidates):
+            event_id = _memory_candidate_id(analysis["event_id"], index, candidate)
+            if event_id in ledger_ids:
+                continue
+            event = activity_event(
+                event_type="memory-candidate",
+                event_id=event_id,
+                source_kind=analysis["source_kind"],
+                source_identity=analysis["source_identity"],
+                knowledge_scope=analysis["knowledge_scope"],
+                evidence_kind="model_inference",
+                verification="unverified",
+                authority="candidate",
+                evidence_locators=candidate["evidence_locators"],
+                title="Memory Candidate",
+                content=candidate["content"],
+                causal_event_ids=[analysis["event_id"]],
+                details={"analysis_schema": analysis.get("analysis_schema", ANALYSIS_SCHEMA)},
+            )
+            self._append_event(event)
+            ledger_ids.add(event_id)
+
+    def _activation_event(
+        self,
+        *,
+        content: str,
+        memory_kind: str,
+        memory_key: str,
+        knowledge_scope: dict[str, str],
+        authority_basis: str,
+        evidence_locators: list[dict[str, Any]],
+        causal_event_ids: list[str],
+        additionally_supersedes: list[str],
+        events: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        events = events if events is not None else self._ledger_events()
+        try:
+            current = active_memory.active_records(events)
+        except active_memory.ActiveMemoryError as exc:
+            raise AssistantError(str(exc)) from exc
+        previous = [
+            item["event_id"]
+            for item in current
+            if item["memory_key"] == memory_key
+            and item["knowledge_scope"] == knowledge_scope
+        ]
+        supersedes = list(dict.fromkeys([*previous, *additionally_supersedes]))
+        event_id = str(uuid.uuid4())
+        return activity_event(
+            event_type="memory-activated",
+            event_id=event_id,
+            source_kind="user_action",
+            source_identity="headlong-assistant",
+            knowledge_scope=knowledge_scope,
+            evidence_kind="user_statement",
+            verification="observed",
+            authority="active",
+            evidence_locators=evidence_locators,
+            title=f"Active {memory_kind}",
+            content=content.strip(),
+            causal_event_ids=causal_event_ids,
+            supersedes_event_ids=supersedes,
+            details={
+                "memory_key": memory_key.strip(),
+                "memory_kind": memory_kind,
+                "authority_basis": authority_basis,
+            },
+        )
+
+    def _rebuild_active_memory_unlocked(self) -> list[dict[str, Any]]:
+        try:
+            return active_memory.rebuild_projection(
+                self.identity.path, self._ledger_events()
+            )
+        except active_memory.ActiveMemoryError as exc:
+            raise AssistantError(str(exc)) from exc
+
+    def _resolve_project(self, selector: str) -> RegisteredProject:
+        projects = self.projects()
+        named = [
+            project for project in projects if selector in {project.id, project.name}
+        ]
+        if len(named) == 1:
+            return named[0]
+        if len(named) > 1:
+            raise AssistantError(f"Registered Project ambiguous: {selector}")
+        canonical = Path(selector).expanduser().resolve(strict=False)
+        path_selector = Path(selector).expanduser().is_absolute()
+        matches = [
+            project
+            for project in projects
+            if project.path == canonical
+            or (path_selector and _contained(canonical, project.path))
+        ]
+        if not matches:
+            raise AssistantError(f"Registered Project not found: {selector}")
+        return max(matches, key=lambda item: len(item.path.parts))
+
+    def _project_for_current_path(self, path: Path) -> RegisteredProject:
+        project = _project_for_cwd(self.projects(), path.expanduser().resolve())
+        if project is None:
+            raise AssistantError(
+                "current directory is not in a Registered Project; use --project or --global"
+            )
+        return project
+
+    @staticmethod
+    def _validate_memory_input(content: str, memory_kind: str, memory_key: str) -> None:
+        if memory_kind not in active_memory.MEMORY_KINDS:
+            raise AssistantError("unsupported Active Memory kind")
+        if not isinstance(content, str) or not content.strip() or len(content) > _MAX_OBSERVATION:
+            raise AssistantError("Active Memory content is empty or exceeds compact limits")
+        if (
+            not isinstance(memory_key, str)
+            or not memory_key.strip()
+            or len(memory_key) > _MAX_MEMORY_KEY
+            or any(char in memory_key for char in "\r\n")
+        ):
+            raise AssistantError("Active Memory key is empty or invalid")
 
     def _append_event(self, event: dict[str, Any]) -> None:
         proc = subprocess.run(
@@ -1757,6 +2036,24 @@ def _analysis_failure_id(
             revision_digest,
             analysis_kind,
         )
+    )
+    return str(uuid.uuid5(_EVENT_NAMESPACE, key))
+
+
+def _memory_candidate_id(
+    analysis_event_id: str, index: int, candidate: dict[str, Any]
+) -> str:
+    key = json.dumps(
+        {
+            "schema": EVENT_SCHEMA,
+            "type": "memory-candidate",
+            "analysis_event_id": analysis_event_id,
+            "index": index,
+            "content": candidate.get("content"),
+            "evidence_locators": candidate.get("evidence_locators"),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
     )
     return str(uuid.uuid5(_EVENT_NAMESPACE, key))
 
