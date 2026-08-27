@@ -69,6 +69,13 @@ _Avoid_: Active Memory, Reference Store
 A compact account of a meaningful change or signal found in an Activity Source.
 _Avoid_: Summary, memory
 
+**Structured Model Result**:
+A bounded auxiliary model result requested with the strongest response schema
+the configured provider supports and independently validated against the same
+local schema before use. It is not the execution interface of HeadLong's native
+monolith or a substitute for its shell actor.
+_Avoid_: JSON prompt, tool call
+
 **Evidence Locator**:
 A stable reference from an Observation or Improvement Proposal to its source
 event or Reference Revision.
@@ -96,13 +103,44 @@ _Avoid_: Namespace, visibility
 
 **Memory Candidate**:
 A possible fact, pattern, or open loop inferred from observations but not yet
-treated as authoritative knowledge.
+promoted by the Observer. It is an optional review state, not a mandatory gate
+before every learned memory.
 _Avoid_: Memory, insight
 
+**HeadLong Memory**:
+The Observer Identity's native Markdown memory managed through HeadLong's
+`mem` commands and existing memory screen. It may contain lessons written by
+the native thinker and HeadLong-compatible projections of Active Memory, but it
+is not the authority record for promotion or scope.
+_Avoid_: Active Memory, Activity Ledger
+
+**Memory Directive**:
+An explicit user request to retain a stated decision, preference, or constraint
+as Active Memory. It is a direct source of memory but is not the only way the
+Observer may learn.
+_Avoid_: Explicit statement, memory hint
+
 **Active Memory**:
-A current decision, preference, or constraint that the user stated explicitly
-or accepted and that remains linked to its evidence and prior versions.
+A current fact, lesson, decision, preference, constraint, goal, or value that
+the Observer learned through HeadLong's native memory behavior or received as a
+Memory Directive and that remains linked to its available evidence and prior
+versions.
 _Avoid_: Memory Candidate, note
+
+**Memory Failure**:
+An observed case where memory has the wrong Knowledge Scope, contradicts its
+evidence, or materially degrades an Improvement Proposal or action. Duplicate
+or awkwardly worded memory is quality feedback but not by itself a Memory
+Failure.
+_Avoid_: Hypothetical risk, duplicate memory
+
+**Historical Backfill**:
+The eventual observation of authorized source history older than the current
+activity frontier. It covers all authorized history, proceeds newest first only
+with capacity left after active and newly idle or archived sessions, and must
+not delay new observations from becoming candidates or proposals. An eligible
+current source should surface its first memory result within five minutes.
+_Avoid_: Initial import, full scan
 
 **Provisional Analysis**:
 A revisable interpretation produced after a Codex Session has been idle for
@@ -113,6 +151,18 @@ _Avoid_: Final result, draft memory
 The reconciliation of a Codex Session's observations after thirty minutes of
 inactivity or archival.
 _Avoid_: Summary, compaction
+
+**Archive Candidate**:
+An evidence-backed proposal that a Codex Session represents completed work and
+may be archived. Model judgment can create a candidate but cannot archive the
+session without user acceptance or a separate Archive Directive.
+_Avoid_: Archived session, completion status
+
+**Archive Directive**:
+Explicit user authorization to archive an identified Codex Session. It may be
+given directly or by accepting an Archive Candidate and is executed through
+Codex's archive interface rather than by editing session files.
+_Avoid_: Archive Candidate, inactivity timeout
 
 **Proposal Inbox**:
 The Observer-owned collection of Improvement Proposals awaiting human review.
