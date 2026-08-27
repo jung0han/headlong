@@ -29,6 +29,7 @@ from headlong_web import (
     hacker_news,
     knowledge,
     model_gateway,
+    native_memory,
     proposals,
     references,
     retrieval,
@@ -994,6 +995,150 @@ class PersonalAssistant:
         except (active_memory.ActiveMemoryError, retrieval.RetrievalError) as exc:
             raise AssistantError(str(exc)) from exc
 
+    def capture_native_memory_mutations(self) -> dict[str, Any]:
+        """Audit native Markdown memory changes without trusting the actor."""
+        result: dict[str, Any] = {
+            "status": "ok",
+            "added": 0,
+            "edited": 0,
+            "forgotten": 0,
+        }
+        snapshot_path = self.state_dir / "native-memory" / "snapshot.json"
+        with self._state_lock():
+            try:
+                previous = native_memory.read_snapshot(snapshot_path)
+                current = native_memory.scan(
+                    self.identity.path / "memories", previous=previous
+                )
+            except native_memory.NativeMemoryError as exc:
+                raise AssistantError(str(exc)) from exc
+            ledger_events = self._ledger_events()
+            ledger_ids = {
+                str(event["step_id"])
+                for event in ledger_events
+                if event.get("step_id")
+            }
+            for memory_id in sorted(current.keys() - previous.keys()):
+                replacement = current[memory_id]
+                event_id = str(
+                    uuid.uuid5(
+                        _EVENT_NAMESPACE,
+                        f"{native_memory.MUTATION_SCHEMA}:added:{memory_id}:"
+                        f"{native_memory.digest(replacement)}",
+                    )
+                )
+                event = activity_event(
+                    event_type="native-memory-added",
+                    event_id=event_id,
+                    source_kind="headlong_memory",
+                    source_identity=memory_id,
+                    knowledge_scope=replacement["knowledge_scope"],
+                    evidence_kind="observed_event",
+                    verification="observed",
+                    authority="active",
+                    evidence_locators=replacement["evidence_locators"],
+                    title=f"Native {replacement['memory_type']} added",
+                    content=replacement["content"],
+                    details={
+                        "mutation_schema": native_memory.MUTATION_SCHEMA,
+                        "memory_id": memory_id,
+                        "memory_type": replacement["memory_type"],
+                        "prior_value": None,
+                        "replacement_value": replacement,
+                    },
+                )
+                if event_id not in ledger_ids:
+                    self._append_event(event)
+                    ledger_ids.add(event_id)
+                    result["added"] += 1
+            for memory_id in sorted(current.keys() & previous.keys()):
+                prior = previous[memory_id]
+                replacement = current[memory_id]
+                if prior == replacement:
+                    continue
+                prior_events = [
+                    event
+                    for event in ledger_events
+                    if event.get("source_kind") == "headlong_memory"
+                    and event.get("memory_id") == memory_id
+                ]
+                supersedes = [prior_events[-1]["event_id"]] if prior_events else []
+                event_id = str(
+                    uuid.uuid5(
+                        _EVENT_NAMESPACE,
+                        f"{native_memory.MUTATION_SCHEMA}:edited:{memory_id}:"
+                        f"{native_memory.digest(prior)}:{native_memory.digest(replacement)}",
+                    )
+                )
+                event = activity_event(
+                    event_type="native-memory-edited",
+                    event_id=event_id,
+                    source_kind="headlong_memory",
+                    source_identity=memory_id,
+                    knowledge_scope=replacement["knowledge_scope"],
+                    evidence_kind="observed_event",
+                    verification="observed",
+                    authority="active",
+                    evidence_locators=replacement["evidence_locators"],
+                    title=f"Native {replacement['memory_type']} edited",
+                    content=replacement["content"],
+                    supersedes_event_ids=supersedes,
+                    details={
+                        "mutation_schema": native_memory.MUTATION_SCHEMA,
+                        "memory_id": memory_id,
+                        "memory_type": replacement["memory_type"],
+                        "prior_value": prior,
+                        "replacement_value": replacement,
+                    },
+                )
+                if event_id not in ledger_ids:
+                    self._append_event(event)
+                    ledger_ids.add(event_id)
+                    result["edited"] += 1
+            for memory_id in sorted(previous.keys() - current.keys()):
+                prior = previous[memory_id]
+                prior_events = [
+                    event
+                    for event in ledger_events
+                    if event.get("source_kind") == "headlong_memory"
+                    and event.get("memory_id") == memory_id
+                ]
+                supersedes = [prior_events[-1]["event_id"]] if prior_events else []
+                event_id = str(
+                    uuid.uuid5(
+                        _EVENT_NAMESPACE,
+                        f"{native_memory.MUTATION_SCHEMA}:forgotten:{memory_id}:"
+                        f"{native_memory.digest(prior)}",
+                    )
+                )
+                event = activity_event(
+                    event_type="native-memory-forgotten",
+                    event_id=event_id,
+                    source_kind="headlong_memory",
+                    source_identity=memory_id,
+                    knowledge_scope=prior["knowledge_scope"],
+                    evidence_kind="observed_event",
+                    verification="observed",
+                    authority="superseded",
+                    evidence_locators=prior["evidence_locators"],
+                    title=f"Native {prior['memory_type']} forgotten",
+                    content=prior["content"],
+                    supersedes_event_ids=supersedes,
+                    details={
+                        "mutation_schema": native_memory.MUTATION_SCHEMA,
+                        "memory_id": memory_id,
+                        "memory_type": prior["memory_type"],
+                        "prior_value": prior,
+                        "replacement_value": None,
+                    },
+                )
+                if event_id not in ledger_ids:
+                    self._append_event(event)
+                    ledger_ids.add(event_id)
+                    result["forgotten"] += 1
+            self._write_state_json(snapshot_path, native_memory.snapshot(current))
+        return result
+
     def response_context(
         self,
         query: str,
@@ -1256,10 +1401,11 @@ class PersonalAssistant:
     def process_codex_once(
         self, active_root: Path, archived_root: Path
     ) -> dict[str, dict[str, Any]]:
-        """Collect one durable source suffix, then run every due analysis."""
+        """Collect sources, run due analysis, and audit native memory."""
         collection = self.follow_codex_once(active_root, archived_root)
         analysis = self.analyze_codex_once(active_root, archived_root)
-        return {"collection": collection, "analysis": analysis}
+        memory = self.capture_native_memory_mutations()
+        return {"collection": collection, "analysis": analysis, "memory": memory}
 
     def analyze_codex_once(
         self, active_root: Path, archived_root: Path
