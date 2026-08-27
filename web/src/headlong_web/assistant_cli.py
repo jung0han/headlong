@@ -96,6 +96,30 @@ def build_parser() -> argparse.ArgumentParser:
     restore_native_memory = native_memory_commands.add_parser("restore")
     restore_native_memory.add_argument("memory_id")
 
+    memory_failure = commands.add_parser(
+        "memory-failure", help="record and inspect observed Memory Failures"
+    )
+    memory_failure_commands = memory_failure.add_subparsers(
+        dest="memory_failure_command", required=True
+    )
+    memory_failure_commands.add_parser("list")
+    memory_failure_commands.add_parser("health")
+    memory_failure_commands.add_parser("quality")
+    report_failure = memory_failure_commands.add_parser("report")
+    report_failure.add_argument("memory_event_id")
+    report_failure.add_argument(
+        "--classification",
+        choices=(
+            "wrong_scope",
+            "evidence_contradicting",
+            "behavior_affecting",
+            "duplicate",
+            "wording_defect",
+        ),
+        required=True,
+    )
+    report_failure.add_argument("--description", required=True)
+
     archive_candidate = commands.add_parser(
         "archive-candidate", help="inspect and review Codex Archive Candidates"
     )
@@ -306,6 +330,23 @@ def run(
                 result = assistant.rebuild_native_memory()
             else:
                 result = assistant.restore_native_memory(args.memory_id)
+        elif args.command == "memory-failure":
+            if args.memory_failure_command == "list":
+                result = {"memory_failures": assistant.memory_failures()}
+            elif args.memory_failure_command == "health":
+                result = assistant.memory_failure_health()
+            elif args.memory_failure_command == "quality":
+                result = {
+                    "memory_quality_observations": (
+                        assistant.memory_quality_observations()
+                    )
+                }
+            else:
+                result = assistant.report_memory_issue(
+                    args.memory_event_id,
+                    args.classification,
+                    args.description,
+                )
         elif args.command == "archive-candidate":
             if args.archive_candidate_command == "list":
                 result = {"archive_candidates": assistant.archive_candidates()}

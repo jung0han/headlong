@@ -36,7 +36,15 @@ class AdapterResult:
 
 
 class ArchiveAdapter(Protocol):
-    """Minimal mutation capability granted to the governance boundary."""
+    """Minimal authenticated mutation capability granted to governance."""
+
+    def execute(
+        self, operation: str, session_id: str, authorization_event_id: str
+    ) -> AdapterResult: ...
+
+
+class CodexArchiveExecutor(Protocol):
+    """Server-side fixed Codex archive/unarchive executor."""
 
     def execute(self, operation: str, session_id: str) -> AdapterResult: ...
 

@@ -80,6 +80,33 @@ val=$(frontmatter_field "$WORK/mem/quoted.md" "nonexistent")
   && ok "missing field returns empty" \
   || bad "missing field returns empty" "got: [$val]"
 
+# --- native learning context is written and survives edits ---
+context_file=$(MEM_DIR="$WORK/contextual" \
+  MEM_KNOWLEDGE_SCOPE="project:project-1" \
+  MEM_EVIDENCE_LOCATORS='[{"kind":"codex_event","sha256":"abc"}]' \
+  "$REPO/bin/mem" add --type decision "Keep this project decision.")
+context_path="$WORK/contextual/$context_file.md"
+scope=$(frontmatter_field "$context_path" "knowledge_scope")
+evidence=$(frontmatter_field "$context_path" "evidence_locators")
+if [[ "$scope" = "project:project-1" ]] \
+    && [[ "$evidence" = '[{"kind":"codex_event","sha256":"abc"}]' ]]; then
+  ok "contextual add preserves Knowledge Scope and evidence"
+else
+  bad "contextual add preserves Knowledge Scope and evidence" "scope=[$scope] evidence=[$evidence]"
+fi
+
+MEM_DIR="$WORK/contextual" "$REPO/bin/mem" edit "$context_file" \
+  "Keep the revised project decision." >/dev/null 2>&1
+context_path=$(find "$WORK/contextual" -name '*.md' -print -quit)
+scope=$(frontmatter_field "$context_path" "knowledge_scope")
+evidence=$(frontmatter_field "$context_path" "evidence_locators")
+if [[ "$scope" = "project:project-1" ]] \
+    && [[ "$evidence" = '[{"kind":"codex_event","sha256":"abc"}]' ]]; then
+  ok "contextual edit preserves Knowledge Scope and evidence"
+else
+  bad "contextual edit preserves Knowledge Scope and evidence" "scope=[$scope] evidence=[$evidence]"
+fi
+
 echo ""
 echo "Results: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

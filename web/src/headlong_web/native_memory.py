@@ -178,6 +178,40 @@ def replay_details(
     return current, tombstones, last_events
 
 
+def preflight_recovery(
+    events: list[dict[str, Any]],
+    *,
+    live: dict[str, dict[str, Any]],
+    snapshot_memories: dict[str, dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], dict[str, str]]:
+    """Validate that replay accounts for every memory known outside the ledger.
+
+    A syntactically valid prefix (including an empty prefix) cannot prove that it
+    is the whole Activity Ledger.  The live projection and durable snapshot are
+    therefore a recovery watermark: every stable id seen by either must occur in
+    the replay as an active value or retained tombstone before a store swap.
+    """
+    current, tombstones, last_events = replay_details(events)
+    accounted = current.keys() | tombstones.keys()
+    missing = sorted((live.keys() | snapshot_memories.keys()) - accounted)
+    if missing:
+        raise NativeMemoryError(
+            "native memory history is incomplete; unaccounted memories: "
+            + ", ".join(missing[:5])
+        )
+    conflicts = sorted(
+        memory_id
+        for memory_id, value in live.items()
+        if current.get(memory_id) != value
+    )
+    if conflicts:
+        raise NativeMemoryError(
+            "native memory history is incomplete; live values are not replayed: "
+            + ", ".join(conflicts[:5])
+        )
+    return current, tombstones, last_events
+
+
 def rebuild_store(memory_dir: Path, current: dict[str, dict[str, Any]]) -> None:
     """Atomically replace the Markdown projection after history validates."""
     if memory_dir.is_symlink():

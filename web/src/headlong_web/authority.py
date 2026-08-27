@@ -28,6 +28,8 @@ PROTECTED_EVENT_TYPES = frozenset(
         "archive-directive",
         "codex-archive-attempt",
         "codex-archive-result",
+        "memory-failure",
+        "memory-quality-observation",
     }
 )
 

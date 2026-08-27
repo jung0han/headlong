@@ -34,10 +34,12 @@ LOCATOR = {
 class FakeArchiveAdapter:
     def __init__(self, results: list[archive_execution.AdapterResult] | None = None):
         self.calls: list[tuple[str, str]] = []
+        self.authorization_ids: list[str] = []
         self.results = results or [archive_execution.AdapterResult("succeeded")]
 
-    def execute(self, operation: str, session_id: str) -> archive_execution.AdapterResult:
+    def execute(self, operation: str, session_id: str, authorization_event_id: str) -> archive_execution.AdapterResult:
         self.calls.append((operation, session_id))
+        self.authorization_ids.append(authorization_event_id)
         return self.results.pop(0)
 
 
@@ -94,6 +96,7 @@ def test_accepting_signed_candidate_archives_once_by_stable_session_identity(
 
     assert adapter.calls == [("archive", SESSION_ID)]
     candidate = accepted["archive_candidates"][0]
+    assert adapter.authorization_ids == [candidate["review_event_id"]]
     assert candidate["review_state"] == "accepted"
     assert candidate["execution_state"] == "succeeded"
     assert candidate["execution_attempts"] == 1

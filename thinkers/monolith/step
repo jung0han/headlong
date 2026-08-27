@@ -130,6 +130,34 @@ trigger_content=$(printf '%s' "$step_json" | jq -r '.content // empty' 2>/dev/nu
 trigger_project_id=$(printf '%s' "$step_json" | jq -r \
     '.project_id // .knowledge_scope.project_id // empty' 2>/dev/null) || true
 
+# Native `mem add` remains free-form actor behavior, but a Personal Assistant
+# Observation supplies the scope/evidence audit context for memories learned on
+# this wake. Never inherit these values from the dispatcher's ambient env.
+unset MEM_KNOWLEDGE_SCOPE MEM_EVIDENCE_LOCATORS
+if [[ "$trigger_type" == "observation" && "$trigger_source" == "personal_assistant" ]]; then
+    trigger_scope_kind=$(printf '%s' "$step_json" | jq -r \
+        '.knowledge_scope.kind // empty' 2>/dev/null) || trigger_scope_kind=""
+    trigger_evidence=$(printf '%s' "$step_json" | jq -ce \
+        '.evidence_locators | select(type == "array" and all(.[]; type == "object"))' \
+        2>/dev/null) || trigger_evidence=""
+    case "$trigger_scope_kind" in
+        global)
+            MEM_KNOWLEDGE_SCOPE="global"
+            ;;
+        project)
+            if [[ "$trigger_project_id" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]]; then
+                MEM_KNOWLEDGE_SCOPE="project:$trigger_project_id"
+            fi
+            ;;
+    esac
+    if [[ -n "${MEM_KNOWLEDGE_SCOPE:-}" && -n "$trigger_evidence" ]]; then
+        MEM_EVIDENCE_LOCATORS="$trigger_evidence"
+        export MEM_KNOWLEDGE_SCOPE MEM_EVIDENCE_LOCATORS
+    else
+        unset MEM_KNOWLEDGE_SCOPE MEM_EVIDENCE_LOCATORS
+    fi
+fi
+
 # ---------------------------------------------------------------------------
 # EXIT-trap liveness: arm the next timer on the way out. next_delay stays ""
 # for no-op wakes (leave the running timer untouched); it is set to 0 (arm an
@@ -247,6 +275,11 @@ shellm_flags=()
 while IFS= read -r _flag; do
     [[ -n "$_flag" ]] && shellm_flags+=("$_flag")
 done < <(_build_shellm_flags "$IDENTITY_DIR" "$run_dir")
+for _memory_context_var in MEM_KNOWLEDGE_SCOPE MEM_EVIDENCE_LOCATORS; do
+    if [[ -n "${!_memory_context_var:-}" ]]; then
+        shellm_flags+=("--var" "$_memory_context_var")
+    fi
+done
 
 # Tiered "life so far" memory (on by default; set MONOLITH_TIERED_MEMORY=0 to
 # disable). recap --context builds rollups only GOING FORWARD from first use, so

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -189,8 +190,15 @@ class ModelGateway:
     def _route_env(self) -> dict[str, str]:
         """Resolve route configuration with the same root/identity precedence as llm."""
         env = control.identity_env(self.identity, self.root)
-        for path in (self.root / ".env", self.identity.path / ".env"):
-            env.update(envfile.parse_env_file(path))
+        inherited = set(os.environ)
+        root_values = dict(envfile.parse_env_file(self.root / ".env"))
+        identity_values = dict(envfile.parse_env_file(self.identity.path / ".env"))
+        for key, value in root_values.items():
+            if key not in inherited:
+                env[key] = value
+        for key, value in identity_values.items():
+            if key not in inherited:
+                env[key] = value
         return env
 
 

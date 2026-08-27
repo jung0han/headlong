@@ -123,13 +123,28 @@ action_add() {
 
     mkdir -p "$MEM_DIR"
 
-    local timestamp hex slug filename summary created
+    local knowledge_scope="${MEM_KNOWLEDGE_SCOPE:-}"
+    local evidence_locators="${MEM_EVIDENCE_LOCATORS:-}"
+    if [[ -n "$knowledge_scope" || -n "$evidence_locators" ]]; then
+        [[ "$knowledge_scope" == "global" || "$knowledge_scope" =~ ^project:[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] \
+            || die "Invalid MEM_KNOWLEDGE_SCOPE"
+        evidence_locators=$(printf '%s' "$evidence_locators" \
+            | jq -ce 'select(type == "array" and all(.[]; type == "object"))') \
+            || die "Invalid MEM_EVIDENCE_LOCATORS"
+    fi
+
+    local timestamp hex slug filename summary created context_block=""
     timestamp=$(date +%Y-%m-%d-%H-%M-%S)
     hex=$(head -c4 /dev/urandom | od -An -tx1 | tr -d ' \n')
     slug=$(slugify "$text")
     filename="${timestamp}_${hex}_${slug}"
     summary=$(printf '%s' "$text" | head -1 | cut -c1-80)
     created=$(date +"%Y-%m-%d %H:%M:%S")
+    if [[ -n "$knowledge_scope" ]]; then
+        context_block="knowledge_scope: $knowledge_scope
+evidence_locators: $evidence_locators
+"
+    fi
 
     cat > "$MEM_DIR/${filename}.md" << EOF
 ---
@@ -137,7 +152,7 @@ id: $hex
 summary: $summary
 type: $MEM_TYPE
 created: $created
----
+${context_block}---
 
 $text
 EOF
@@ -294,11 +309,13 @@ action_edit() {
     now=$(date +"%Y-%m-%d %H:%M:%S")
 
     # Extract frontmatter fields
-    local summary type created id
+    local summary type created id knowledge_scope evidence_locators
     summary=$(printf '%s' "$text" | head -1 | head -c 80)
     type=$(frontmatter_field "$file" "type")
     created=$(frontmatter_field "$file" "created")
     id=$(frontmatter_field "$file" "id")
+    knowledge_scope=$(frontmatter_field "$file" "knowledge_scope")
+    evidence_locators=$(frontmatter_field "$file" "evidence_locators")
 
     # Build updated: field — collect existing entries and append new one
     local updated_block=""
@@ -322,6 +339,12 @@ action_edit() {
     local id_line=""
     [[ -n "$id" ]] && id_line="id: $id
 "
+    local context_block=""
+    if [[ -n "$knowledge_scope" ]]; then
+        context_block="knowledge_scope: $knowledge_scope
+evidence_locators: $evidence_locators
+"
+    fi
 
     cat > "$file" << EOF
 ---
@@ -329,7 +352,7 @@ ${id_line}summary: $summary
 type: $type
 created: $created
 $updated_block
----
+${context_block}---
 
 $text
 EOF

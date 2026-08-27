@@ -36,7 +36,7 @@ SYMLINKS="${SYMLINKS:-0}"
 RUN_INIT=0
 # Core agent tools (bin/) and the management/aux CLIs around them (tools/).
 BIN_TOOLS=(shellm shellm-docker skills mem llm context traj thinkers chat focus recap glob view put sub)
-AUX_TOOLS=(shellm-docker-broker identity shellm-explore headlong-init headlong-model-probe headlong-json-schema headlong-model-result headlong-recap-render headlong-run-summary headlong-killall persona headlong-web headlong-assistant headlong-slack-bridge headlong-telegram-bridge)
+AUX_TOOLS=(shellm-docker-broker identity shellm-explore headlong-init headlong-model-probe headlong-json-schema headlong-model-result headlong-recap-render headlong-run-summary headlong-killall persona headlong-web headlong-assistant headlong-archive-boundary headlong-slack-bridge headlong-telegram-bridge)
 TOOLS=("${BIN_TOOLS[@]}" "${AUX_TOOLS[@]}")
 
 # ---------------------------------------------------------------------------
