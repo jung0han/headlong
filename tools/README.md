@@ -11,7 +11,8 @@ tools live in [bin/](../bin/).
   `headlong-telegram-bridge` connect chat platforms into the mind.
 - `headlong-assistant` registers projects and runs the proposal-only Personal
   Assistant source adapters. `project add/list/remove` is the public boundary
-  for choosing which development work may be observed;
+  for choosing which development work may be observed; `follow-codex` performs
+  one restart-safe incremental collection poll over configured Codex roots;
   `web-source add/list/remove`, `observe-web`, and `reference list/show` manage
   bounded public sources and their immutable saved revisions.
 - `shellm-docker-broker` is the host-side policy server for brokered

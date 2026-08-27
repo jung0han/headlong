@@ -22,12 +22,21 @@ from typing import Any, Iterator
 from urllib.parse import urlsplit
 
 from headlong_web import control, discovery, references, trajectory
+from headlong_web.codex_bridge import (
+    CURSOR_SCHEMA,
+    CodexBridgeError,
+    CodexSource,
+    complete_rows,
+    discover_sources,
+    resume_position,
+)
 
 REGISTRATION_SCHEMA = "headlong.assistant.registrations/v1"
 EVENT_SCHEMA = "headlong.activity-ledger/v1"
 LOCATOR_SCHEMA = "headlong.evidence-locator/v1"
 ANALYSIS_SCHEMA = "headlong.codex-observation/v1"
 WEB_SELECTION_SCHEMA = "headlong.web-reference-selection/v1"
+SOURCE_EVENT_SCHEMA = "headlong.codex-source-event/v1"
 _EVENT_NAMESPACE = uuid.UUID("88d66cf8-0918-4593-974e-71e544b6fd5b")
 _MAX_TITLE = 160
 _MAX_OBSERVATION = 1200
@@ -386,6 +395,77 @@ class PersonalAssistant:
         except references.ReferenceError as exc:
             raise AssistantError(str(exc)) from exc
 
+    def follow_codex_once(
+        self, active_root: Path, archived_root: Path
+    ) -> dict[str, Any]:
+        """Collect complete records appended to eligible active session streams."""
+        roots = {"active": active_root.resolve(), "archived": archived_root.resolve()}
+        result: dict[str, Any] = {
+            "appended": 0,
+            "deferred": 0,
+            "discovered": 0,
+            "duplicate": 0,
+            "eligible": 0,
+            "errors": [],
+            "recovered": 0,
+            "status": "ok",
+        }
+        with self._state_lock():
+            projects = self.projects()
+            ledger_ids = self._ledger_event_ids()
+            sources, discovery_errors = discover_sources(roots)
+            result["discovered"] = len(sources) + len(discovery_errors)
+            result["errors"].extend(discovery_errors)
+            if discovery_errors:
+                result["status"] = "degraded"
+            for source in sources:
+                project = _project_for_cwd(projects, source.cwd)
+                if project is None:
+                    continue
+                result["eligible"] += 1
+                cursor = self._read_codex_cursor(source.id)
+                offset, line = resume_position(source, cursor)
+                if cursor is not None and offset == 0:
+                    result["recovered"] += 1
+                advanced = False
+                try:
+                    rows = complete_rows(source.path, offset)
+                    for raw_offset, raw in rows:
+                        line += 1
+                        locator = EvidenceLocator(
+                            source_identity=source.id,
+                            source_root=source.source_root,
+                            relative_path=source.relative_path,
+                            line=line,
+                            byte_offset=raw_offset,
+                            byte_length=len(raw),
+                            sha256=hashlib.sha256(raw).hexdigest(),
+                            host=socket.gethostname(),
+                        )
+                        event_id = _source_event_id(project.id, locator)
+                        if event_id in ledger_ids:
+                            result["duplicate"] += 1
+                        else:
+                            self._append_event(source_event(event_id, project, source, locator, raw))
+                            ledger_ids.add(event_id)
+                            result["appended"] += 1
+                        offset = raw_offset + len(raw)
+                        self._write_codex_cursor(source, offset, line, locator)
+                        advanced = True
+                except CodexBridgeError as exc:
+                    raise AssistantError(str(exc)) from exc
+                if cursor is not None and not advanced and _cursor_moved(cursor, source):
+                    self._write_codex_cursor(
+                        source,
+                        offset,
+                        line,
+                        EvidenceLocator.decode(cursor["last_complete_locator"]),
+                    )
+                if source.path.stat().st_size > offset:
+                    result["deferred"] += 1
+            self._write_source_health("codex", result)
+        return result
+
     def resolve_evidence(
         self, locator: EvidenceLocator, active_root: Path, archived_root: Path
     ) -> bytes:
@@ -517,10 +597,17 @@ class PersonalAssistant:
         return {"selected": selected, "title": title.strip(), "summary": summary.strip()}
 
     def _ledger_has(self, event_id: str) -> bool:
+        return event_id in self._ledger_event_ids()
+
+    def _ledger_event_ids(self) -> set[str]:
         traj_dir = discovery.find_root_traj_dir(self.identity)
         if traj_dir is None:
             raise AssistantError("Observer Identity has no root trajectory")
-        return any(step.get("step_id") == event_id for step in trajectory.iter_jsonl(traj_dir / "trajectory.jsonl"))
+        return {
+            str(step["step_id"])
+            for step in trajectory.iter_jsonl(traj_dir / "trajectory.jsonl")
+            if step.get("step_id")
+        }
 
     def _append_event(self, event: dict[str, Any]) -> None:
         proc = subprocess.run(
@@ -564,6 +651,79 @@ class PersonalAssistant:
         temp = self.registrations_file.with_suffix(f".tmp.{os.getpid()}")
         temp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
         os.replace(temp, self.registrations_file)
+
+    def _read_codex_cursor(self, session_id: str) -> dict[str, Any] | None:
+        path = self.state_dir / "cursors" / "codex" / f"{session_id}.json"
+        try:
+            value = json.loads(path.read_text())
+        except FileNotFoundError:
+            return None
+        except (OSError, json.JSONDecodeError) as exc:
+            raise AssistantError(f"cannot read Codex cursor: {session_id}") from exc
+        if (
+            not isinstance(value, dict)
+            or value.get("schema") != CURSOR_SCHEMA
+            or value.get("session_id") != session_id
+        ):
+            raise AssistantError(f"unsupported Codex cursor: {session_id}")
+        return value
+
+    def _write_codex_cursor(
+        self,
+        source: CodexSource,
+        offset: int,
+        line: int,
+        locator: EvidenceLocator,
+    ) -> None:
+        value = {
+            "schema": CURSOR_SCHEMA,
+            "host": socket.gethostname(),
+            "session_id": source.id,
+            "source_root": source.source_root,
+            "relative_path": source.relative_path,
+            "canonical_path": str(source.path.resolve()),
+            "device": source.device,
+            "inode": source.inode,
+            "byte_offset": offset,
+            "line": line,
+            "last_complete_locator": locator.to_dict(),
+        }
+        self._write_state_json(
+            self.state_dir / "cursors" / "codex" / f"{source.id}.json", value
+        )
+
+    def _write_source_health(self, source: str, value: dict[str, Any]) -> None:
+        health = {
+            "schema": "headlong.source-health/v1",
+            "source": source,
+            "status": value["status"],
+            "errors": value["errors"],
+        }
+        self._write_state_json(self.state_dir / "source-health" / f"{source}.json", health)
+
+    @staticmethod
+    def _write_state_json(path: Path, value: dict[str, Any]) -> None:
+        temp = path.with_name(f".{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with temp.open("w") as fh:
+                json.dump(value, fh, indent=2, sort_keys=True)
+                fh.write("\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(temp, path)
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError as exc:
+            raise AssistantError(f"cannot write durable assistant state: {path}") from exc
+        finally:
+            try:
+                temp.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     @contextmanager
     def _state_lock(self) -> Iterator[None]:
@@ -627,6 +787,40 @@ def reference_revision_event(metadata: dict[str, Any]) -> dict[str, Any]:
             "content_digest": metadata["content_digest"],
             "fetched_at": metadata["fetched_at"],
             "media_type": metadata["media_type"],
+        },
+    )
+
+
+def source_event(
+    event_id: str,
+    project: RegisteredProject,
+    source: CodexSource,
+    locator: EvidenceLocator,
+    raw: bytes,
+) -> dict[str, Any]:
+    """Represent one collected source row without copying its raw content."""
+    source_type = "unknown"
+    try:
+        value = json.loads(raw)
+        if isinstance(value, dict) and isinstance(value.get("type"), str):
+            source_type = value["type"]
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        pass
+    return activity_event(
+        event_type="activity-source-event",
+        event_id=event_id,
+        source_kind="codex_session",
+        source_identity=source.id,
+        knowledge_scope={"kind": "project", "project_id": project.id},
+        evidence_kind="observed_event",
+        verification="observed",
+        authority="candidate",
+        evidence_locators=[locator.to_dict()],
+        title="Codex Session source event",
+        content=f"Collected complete Codex Session record of type {source_type}.",
+        details={
+            "source_event_schema": SOURCE_EVENT_SCHEMA,
+            "source_event_type": source_type,
         },
     )
 
@@ -877,3 +1071,27 @@ def parse_web_source_name(url: str) -> str:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _source_event_id(project_id: str, locator: EvidenceLocator) -> str:
+    key = ":".join(
+        (
+            SOURCE_EVENT_SCHEMA,
+            project_id,
+            locator.source_identity,
+            str(locator.byte_offset),
+            str(locator.byte_length),
+            locator.sha256,
+        )
+    )
+    return str(uuid.uuid5(_EVENT_NAMESPACE, key))
+
+
+def _cursor_moved(cursor: dict[str, Any], source: CodexSource) -> bool:
+    return (
+        cursor.get("source_root") != source.source_root
+        or cursor.get("relative_path") != source.relative_path
+        or cursor.get("canonical_path") != str(source.path.resolve())
+        or cursor.get("device") != source.device
+        or cursor.get("inode") != source.inode
+    )
