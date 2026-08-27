@@ -12,6 +12,7 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
@@ -164,6 +165,10 @@ class KillallBody(BaseModel):
 class EnvVarBody(BaseModel):
     key: str
     value: str
+
+
+class ProposalReviewBody(BaseModel):
+    state: Literal["pending", "accepted", "rejected", "dismissed"]
 
 
 def create_app(
@@ -556,6 +561,39 @@ def create_app(
             return assistant.PersonalAssistant(root, identity).references()
         except assistant.AssistantError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.get("/api/identities/{identity_id}/proposals")
+    def identity_proposals(identity_id: str) -> list[dict]:
+        identity = _identity_or_404(root, identity_id)
+        try:
+            return assistant.PersonalAssistant(root, identity).proposals()
+        except assistant.AssistantError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.get("/api/identities/{identity_id}/proposals/{proposal_id}")
+    def identity_proposal(identity_id: str, proposal_id: str) -> dict:
+        identity = _identity_or_404(root, identity_id)
+        try:
+            result = assistant.PersonalAssistant(root, identity).proposal(proposal_id)
+        except assistant.AssistantError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if result is None:
+            raise HTTPException(status_code=404, detail="Proposal not found")
+        return result
+
+    @app.post("/api/identities/{identity_id}/proposals/{proposal_id}/review")
+    def identity_proposal_review(
+        identity_id: str, proposal_id: str, body: ProposalReviewBody
+    ) -> dict:
+        _require_controls()
+        identity = _identity_or_404(root, identity_id)
+        try:
+            return assistant.PersonalAssistant(root, identity).review_proposal(
+                proposal_id, body.state
+            )
+        except assistant.AssistantError as exc:
+            status = 404 if "not found" in str(exc) else 422
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
 
     @app.get("/api/identities/{identity_id}/web-sources/health")
     def identity_web_source_health(identity_id: str) -> list[dict]:

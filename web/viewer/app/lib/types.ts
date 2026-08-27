@@ -195,6 +195,48 @@ export interface IdentityEnv {
   note: string;
 }
 
+export type ProposalReviewState =
+  | "pending"
+  | "accepted"
+  | "rejected"
+  | "dismissed";
+
+export type DirectEvidenceKind =
+  | "user_correction"
+  | "test_failure"
+  | "tool_failure"
+  | "reviewer_finding";
+
+export interface ProposalEvidenceLocator {
+  schema: "headlong.evidence-locator/v1";
+  kind: "codex_event";
+  source_identity: string;
+  source_root: "active" | "archived";
+  relative_path: string;
+  line: number;
+  byte_offset: number;
+  byte_length: number;
+  sha256: string;
+  host: string;
+}
+
+export interface WorkImprovementProposal {
+  proposal_id: string;
+  proposal_type: "work";
+  title: string;
+  content: string;
+  knowledge_scope: { kind: "project"; project_id: string };
+  evidence_kind: DirectEvidenceKind;
+  evidence_locators: ProposalEvidenceLocator[];
+  source_identity: string;
+  source_analysis_event_id: string;
+  review_state: ProposalReviewState;
+  execution_authority: "none";
+  created_at: string | null;
+  review_event_id: string | null;
+  reviewed_at: string | null;
+}
+
 export interface KillallResult {
   ok: boolean;
   dry_run: boolean;

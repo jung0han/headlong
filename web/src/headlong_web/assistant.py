@@ -21,7 +21,14 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 from urllib.parse import urlsplit
 
-from headlong_web import codex_analysis, control, discovery, references, trajectory
+from headlong_web import (
+    codex_analysis,
+    control,
+    discovery,
+    proposals,
+    references,
+    trajectory,
+)
 from headlong_web.codex_bridge import (
     CURSOR_SCHEMA,
     CodexBridgeError,
@@ -577,6 +584,37 @@ class PersonalAssistant:
         except references.ReferenceError as exc:
             raise AssistantError(str(exc)) from exc
 
+    def proposals(self) -> list[dict[str, Any]]:
+        """Return the Proposal Inbox rebuilt from the canonical ledger."""
+        try:
+            return proposals.build_inbox(self._ledger_events())
+        except proposals.ProposalError as exc:
+            raise AssistantError(str(exc)) from exc
+
+    def proposal(self, proposal_id: str) -> dict[str, Any] | None:
+        try:
+            return proposals.find_proposal(self._ledger_events(), proposal_id)
+        except proposals.ProposalError as exc:
+            raise AssistantError(str(exc)) from exc
+
+    def review_proposal(self, proposal_id: str, state: str) -> dict[str, Any]:
+        """Append one review event and return the rebuilt current proposal."""
+        with self._state_lock():
+            current = self.proposal(proposal_id)
+            if current is None:
+                raise AssistantError(
+                    f"Work Improvement Proposal not found: {proposal_id}"
+                )
+            try:
+                event = proposals.review_event(current, state)
+            except proposals.ProposalError as exc:
+                raise AssistantError(str(exc)) from exc
+            self._append_event(event)
+            reviewed = self.proposal(proposal_id)
+            if reviewed is None:  # The append succeeded, so this is ledger corruption.
+                raise AssistantError("reviewed proposal disappeared from the ledger")
+            return reviewed
+
     def follow_codex_once(
         self, active_root: Path, archived_root: Path
     ) -> dict[str, Any]:
@@ -782,6 +820,7 @@ class PersonalAssistant:
 
             if result["errors"] or result["failed"]:
                 result["status"] = "degraded"
+            result["work_proposals_created"] = self._sync_work_proposals(ledger_ids)
             result["sessions"] = session_health
             self._write_source_health("codex", "analysis", result)
         return result
@@ -1045,15 +1084,35 @@ class PersonalAssistant:
     def _ledger_has(self, event_id: str) -> bool:
         return event_id in self._ledger_event_ids()
 
-    def _ledger_event_ids(self) -> set[str]:
+    def _ledger_events(self) -> list[dict[str, Any]]:
         traj_dir = discovery.find_root_traj_dir(self.identity)
         if traj_dir is None:
             raise AssistantError("Observer Identity has no root trajectory")
+        return list(trajectory.iter_jsonl(traj_dir / "trajectory.jsonl"))
+
+    def _ledger_event_ids(self) -> set[str]:
         return {
             str(step["step_id"])
-            for step in trajectory.iter_jsonl(traj_dir / "trajectory.jsonl")
+            for step in self._ledger_events()
             if step.get("step_id")
         }
+
+    def _sync_work_proposals(self, ledger_ids: set[str]) -> int:
+        """Materialize every missing direct-evidence proposal idempotently."""
+        created = 0
+        analyses = self._ledger_events()
+        for analysis in analyses:
+            try:
+                candidates = proposals.work_proposal_events(analysis)
+            except proposals.ProposalError as exc:
+                raise AssistantError(str(exc)) from exc
+            for event in candidates:
+                if event["event_id"] in ledger_ids:
+                    continue
+                self._append_event(event)
+                ledger_ids.add(event["event_id"])
+                created += 1
+        return created
 
     def _append_event(self, event: dict[str, Any]) -> None:
         proc = subprocess.run(
