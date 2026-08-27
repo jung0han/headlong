@@ -61,6 +61,7 @@ class FakeLiteLLM:
                         "evidence_locators": [locators[-1]],
                         "memory_candidates": [],
                         "improvement_signals": [],
+                        "archive_candidates": [],
                     }
                 )
                 payload = json.dumps(

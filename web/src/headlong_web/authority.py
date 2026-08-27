@@ -23,6 +23,8 @@ PROTECTED_EVENT_TYPES = frozenset(
         "work-improvement-proposal",
         "observer-improvement-proposal",
         "proposal-evidence-update",
+        "archive-candidate",
+        "archive-candidate-review",
     }
 )
 

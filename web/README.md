@@ -72,6 +72,9 @@ still honored.
   `run/logs/*.log`, with start/stop controls.
 - **Memories** (`/i/<identity>/memories`) — searchable, type-filtered memory
   cards with frontmatter summaries and dates, plus the full Markdown reader.
+- **Archive** (`/i/<identity>/archive-candidates`) — pending and reviewed Codex
+  Archive Candidates with stable session/project identity, resolvable source
+  evidence, and review controls that do not execute archival.
 - **Health** (`/i/<identity>/health`) — reply latency, stalls, and LLM
   provider health inferred from the mind log.
 - **Shadow gate** (`/i/<identity>/shadow`) — elapsed evaluation time, Final
