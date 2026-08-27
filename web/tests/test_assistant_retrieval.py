@@ -165,6 +165,36 @@ def test_reference_scope_is_filtered_before_ranking(tmp_path: Path):
     assert hidden["references"] == []
 
 
+def test_each_ranked_reference_retains_its_own_scope(tmp_path: Path):
+    _root, identity_dir, assistant, project_a, _project_b = _setup_scoped_knowledge(
+        tmp_path
+    )
+    references.store_reference(
+        identity_dir,
+        references.FetchedDocument(
+            source_url="https://example.com/project-a-artifacts",
+            media_type="text/plain",
+            text="Project Alpha generated artifacts require a local review.",
+        ),
+        fetched_at="2026-08-27T03:00:00Z",
+        title="Project Alpha artifact review",
+        summary="A project-local generated artifacts rule.",
+        knowledge_scope={"kind": "project", "project_id": project_a},
+    )
+
+    context = assistant.response_context("generated artifacts", project_a)
+    scopes = {
+        item["title"]: item["knowledge_scope"] for item in context["references"]
+    }
+    assert scopes == {
+        "Project Alpha artifact review": {
+            "kind": "project",
+            "project_id": project_a,
+        },
+        "Ruff migration guide": {"kind": "global"},
+    }
+
+
 def test_legacy_reference_without_scope_remains_explicitly_global(tmp_path: Path):
     _root, identity_dir, assistant, project_a, _project_b = _setup_scoped_knowledge(
         tmp_path

@@ -231,7 +231,7 @@ def _reference_candidates(
         metadata_rows = references.list_references(identity_dir)
     except references.ReferenceError as exc:
         raise RetrievalError(str(exc)) from exc
-    candidates: list[tuple[dict[str, Any], str]] = []
+    candidates: list[tuple[dict[str, Any], str, KnowledgeScope]] = []
     index = _LexicalIndex()
     for metadata in metadata_rows:
         try:
@@ -264,9 +264,9 @@ def _reference_candidates(
         )
         candidate_id = f"{revision['source_id']}:{revision['revision_id']}"
         index.add(candidate_id, search_text)
-        candidates.append((revision, candidate_id))
+        candidates.append((revision, candidate_id, scope))
     ranked: list[tuple[tuple[int, int, int, str, str], dict[str, Any]]] = []
-    for revision, candidate_id in candidates:
+    for revision, candidate_id, scope in candidates:
         score = index.score(candidate_id, terms)
         if score[0] == 0:
             continue
