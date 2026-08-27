@@ -25,6 +25,9 @@ PROTECTED_EVENT_TYPES = frozenset(
         "proposal-evidence-update",
         "archive-candidate",
         "archive-candidate-review",
+        "archive-directive",
+        "codex-archive-attempt",
+        "codex-archive-result",
     }
 )
 

@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from headlong_web import (
     archive_candidates,
+    archive_execution,
     authority,
     control,
     discovery,
@@ -134,9 +135,11 @@ class GovernanceService:
         ledger: ActivityLedger,
         *,
         clock: Callable[[], datetime],
+        archive_adapter: archive_execution.ArchiveAdapter,
     ):
         self.ledger = ledger
         self.clock = clock
+        self.archive_adapter = archive_adapter
 
     def proposals(self) -> list[dict[str, Any]]:
         try:
@@ -153,9 +156,7 @@ class GovernanceService:
     def review_proposal(self, proposal_id: str, state: str) -> dict[str, Any]:
         current = self.proposal(proposal_id)
         if current is None:
-            raise AssistantServiceError(
-                f"Work Improvement Proposal not found: {proposal_id}"
-            )
+            raise AssistantServiceError(f"Work Improvement Proposal not found: {proposal_id}")
         try:
             event = proposals.review_event(current, state)
         except proposals.ProposalError as exc:
@@ -168,19 +169,37 @@ class GovernanceService:
 
     def archive_candidates(self) -> list[dict[str, Any]]:
         try:
-            return archive_candidates.build_inbox(self.ledger.events())
-        except archive_candidates.ArchiveCandidateError as exc:
+            events = self.ledger.events()
+            return [
+                {
+                    **candidate,
+                    **archive_execution.candidate_execution(events, candidate["candidate_id"]),
+                }
+                for candidate in archive_candidates.build_inbox(events)
+            ]
+        except (
+            archive_candidates.ArchiveCandidateError,
+            archive_execution.ArchiveExecutionError,
+        ) as exc:
             raise AssistantServiceError(str(exc)) from exc
 
     def archive_candidate(self, candidate_id: str) -> dict[str, Any] | None:
         try:
-            return archive_candidates.find_candidate(self.ledger.events(), candidate_id)
-        except archive_candidates.ArchiveCandidateError as exc:
+            events = self.ledger.events()
+            candidate = archive_candidates.find_candidate(events, candidate_id)
+            if candidate is None:
+                return None
+            return {
+                **candidate,
+                **archive_execution.candidate_execution(events, candidate_id),
+            }
+        except (
+            archive_candidates.ArchiveCandidateError,
+            archive_execution.ArchiveExecutionError,
+        ) as exc:
             raise AssistantServiceError(str(exc)) from exc
 
-    def review_archive_candidates(
-        self, candidate_ids: list[str], state: str
-    ) -> list[dict[str, Any]]:
+    def review_archive_candidates(self, candidate_ids: list[str], state: str) -> list[dict[str, Any]]:
         unique_ids = list(dict.fromkeys(candidate_ids))
         if not unique_ids:
             raise AssistantServiceError("select at least one Archive Candidate")
@@ -188,9 +207,7 @@ class GovernanceService:
         for candidate_id in unique_ids:
             candidate = self.archive_candidate(candidate_id)
             if candidate is None:
-                raise AssistantServiceError(
-                    f"Archive Candidate not found: {candidate_id}"
-                )
+                raise AssistantServiceError(f"Archive Candidate not found: {candidate_id}")
             current.append(candidate)
         try:
             events = [
@@ -202,8 +219,104 @@ class GovernanceService:
             raise AssistantServiceError(str(exc)) from exc
         for event in events:
             self.ledger.append(event)
+        if state == "accepted":
+            by_id = {candidate["candidate_id"]: candidate for candidate in current}
+            for review in events:
+                candidate = by_id[review["candidate_id"]]
+                self._execute_archive_candidate(candidate, review["event_id"])
         rebuilt = {item["candidate_id"]: item for item in self.archive_candidates()}
         return [rebuilt[candidate_id] for candidate_id in unique_ids]
+
+    def _execute_archive_candidate(self, candidate: dict[str, Any], authorization_event_id: str) -> None:
+        self._execute_authorized(
+            "archive",
+            candidate["session_id"],
+            authorization_event_id,
+            candidate_id=candidate["candidate_id"],
+        )
+
+    def retry_archive_candidate(self, candidate_id: str) -> dict[str, Any]:
+        candidate = self.archive_candidate(candidate_id)
+        if candidate is None:
+            raise AssistantServiceError(f"Archive Candidate not found: {candidate_id}")
+        if (
+            candidate["review_state"] != "accepted"
+            or candidate["archive_authority"] != "authorized"
+            or not candidate.get("review_event_id")
+        ):
+            raise AssistantServiceError("Archive Candidate has no accepted user authority to retry")
+        if candidate["execution_state"] in {"succeeded", "already_done"}:
+            return candidate
+        self._execute_archive_candidate(candidate, candidate["review_event_id"])
+        rebuilt = self.archive_candidate(candidate_id)
+        if rebuilt is None:
+            raise AssistantServiceError("Archive Candidate disappeared from the ledger")
+        return rebuilt
+
+    def execute_directive(self, operation: str, session_id: str) -> dict[str, Any]:
+        events = self.ledger.events()
+        latest = archive_execution.latest_session_execution(events, session_id)
+        if (
+            latest is not None
+            and latest["operation"] == operation
+            and latest["execution_state"] in {"succeeded", "already_done"}
+        ):
+            return latest
+        authorization_id = None
+        if (
+            latest is not None
+            and latest["operation"] == operation
+            and latest["authorization_kind"] == "direct"
+        ):
+            authorization_id = latest["authorization_event_id"]
+        if authorization_id is None:
+            directive = archive_execution.directive_event(operation, session_id)
+            self.ledger.append(directive)
+            authorization_id = directive["event_id"]
+            events = [*events, directive]
+        self._execute_authorized(operation, session_id, authorization_id, candidate_id=None)
+        rebuilt = archive_execution.latest_session_execution(self.ledger.events(), session_id)
+        if rebuilt is None:
+            raise AssistantServiceError("Codex archive execution disappeared from the ledger")
+        return rebuilt
+
+    def _execute_authorized(
+        self,
+        operation: str,
+        session_id: str,
+        authorization_event_id: str,
+        *,
+        candidate_id: str | None,
+    ) -> None:
+        events = self.ledger.events()
+        attempt = archive_execution.attempt_event(
+            operation=operation,
+            session_id=session_id,
+            authorization_event_id=authorization_event_id,
+            candidate_id=candidate_id,
+            attempt_number=archive_execution.attempt_count(events, authorization_event_id) + 1,
+        )
+        self.ledger.append(attempt)
+        latest = archive_execution.latest_session_execution(events, session_id)
+        if (
+            latest is not None
+            and latest["operation"] == operation
+            and latest["execution_state"] in {"succeeded", "already_done"}
+        ):
+            result = archive_execution.AdapterResult(
+                "already_done",
+                message=f"Codex session {operation} was already recorded as complete.",
+            )
+        else:
+            try:
+                result = self.archive_adapter.execute(operation, session_id)
+            except (OSError, RuntimeError) as exc:  # defensive adapter containment
+                result = archive_execution.AdapterResult(
+                    "failed",
+                    error_code="adapter_failed",
+                    message=(str(exc).strip() or "Archive adapter failed.")[:500],
+                )
+        self.ledger.append(archive_execution.result_event(attempt, result))
 
     def shadow_report(self) -> dict[str, Any]:
         try:

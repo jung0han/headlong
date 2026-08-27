@@ -35,6 +35,7 @@ import type {
   ShadowGateReport,
   ArchiveCandidate,
   ArchiveCandidateEvidence,
+  ArchiveExecution,
 } from "~/lib/types";
 
 export const API_BASE = import.meta.env.VITE_API_URL ?? "";
@@ -266,6 +267,27 @@ export function reviewArchiveCandidate(
   return postJson(
     `/api/identities/${encodeURIComponent(identityId)}/archive-candidates/${encodeURIComponent(candidateId)}/review`,
     { state }
+  );
+}
+
+export function retryArchiveCandidate(
+  identityId: string,
+  candidateId: string
+): Promise<ArchiveCandidate> {
+  return postJson(
+    `/api/identities/${encodeURIComponent(identityId)}/archive-candidates/${encodeURIComponent(candidateId)}/retry`,
+    {}
+  );
+}
+
+export function executeCodexArchive(
+  identityId: string,
+  sessionId: string,
+  operation: "archive" | "unarchive"
+): Promise<ArchiveExecution> {
+  return postJson(
+    `/api/identities/${encodeURIComponent(identityId)}/codex-sessions/${encodeURIComponent(sessionId)}/${operation}`,
+    {}
   );
 }
 

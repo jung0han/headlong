@@ -74,7 +74,9 @@ still honored.
   cards with frontmatter summaries and dates, plus the full Markdown reader.
 - **Archive** (`/i/<identity>/archive-candidates`) — pending and reviewed Codex
   Archive Candidates with stable session/project identity, resolvable source
-  evidence, and review controls that do not execute archival.
+  evidence, review state separated from execution state, direct Archive
+  Directives, actionable failures, retry, and unarchive recovery through the
+  capability-probed Codex interface.
 - **Health** (`/i/<identity>/health`) — reply latency, stalls, and LLM
   provider health inferred from the mind log.
 - **Shadow gate** (`/i/<identity>/shadow`) — elapsed evaluation time, Final

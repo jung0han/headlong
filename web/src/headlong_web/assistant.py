@@ -23,6 +23,7 @@ from urllib.parse import urlsplit
 
 from headlong_web import (
     archive_candidates,
+    archive_execution,
     active_memory,
     assistant_services,
     codex_analysis,
@@ -223,6 +224,7 @@ class PersonalAssistant:
         *,
         clock: Callable[[], datetime] | None = None,
         monotonic: Callable[[], float] | None = None,
+        archive_adapter: archive_execution.ArchiveAdapter | None = None,
     ):
         self.root = root.resolve()
         self.identity = identity
@@ -236,7 +238,13 @@ class PersonalAssistant:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._monotonic = monotonic or time.monotonic
         self._governance = assistant_services.GovernanceService(
-            self._ledger, clock=self._now
+            self._ledger,
+            clock=self._now,
+            archive_adapter=(
+                archive_adapter
+                if archive_adapter is not None
+                else archive_execution.CodexArchiveAdapter()
+            ),
         )
 
     def projects(self) -> list[RegisteredProject]:
@@ -921,15 +929,48 @@ class PersonalAssistant:
     def review_archive_candidates(
         self, candidate_ids: list[str], state: str
     ) -> dict[str, Any]:
-        """Append individual or batch review authority without execution."""
+        """Review candidates and execute newly accepted archive authority."""
         with self._state_lock():
             try:
                 reviewed = self._governance.review_archive_candidates(
                     candidate_ids, state
                 )
-            except assistant_services.AssistantServiceError as exc:
+            except (
+                assistant_services.AssistantServiceError,
+                archive_execution.ArchiveExecutionError,
+            ) as exc:
                 raise AssistantError(str(exc)) from exc
         return {"archive_candidates": reviewed}
+
+    def archive_codex_session(self, session_id: str) -> dict[str, Any]:
+        """Execute one direct Archive Directive through the Codex adapter."""
+        with self._state_lock():
+            try:
+                return self._governance.execute_directive("archive", session_id)
+            except (
+                assistant_services.AssistantServiceError,
+                archive_execution.ArchiveExecutionError,
+            ) as exc:
+                raise AssistantError(str(exc)) from exc
+
+    def unarchive_codex_session(self, session_id: str) -> dict[str, Any]:
+        """Restore one identified session through the Codex adapter."""
+        with self._state_lock():
+            try:
+                return self._governance.execute_directive("unarchive", session_id)
+            except (
+                assistant_services.AssistantServiceError,
+                archive_execution.ArchiveExecutionError,
+            ) as exc:
+                raise AssistantError(str(exc)) from exc
+
+    def retry_archive_candidate(self, candidate_id: str) -> dict[str, Any]:
+        """Retry a failed accepted candidate without another approval prompt."""
+        with self._state_lock():
+            try:
+                return self._governance.retry_archive_candidate(candidate_id)
+            except assistant_services.AssistantServiceError as exc:
+                raise AssistantError(str(exc)) from exc
 
     def shadow_gate_report(self) -> dict[str, Any]:
         """Return the live, ledger-derived proposal-only evaluation report."""

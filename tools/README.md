@@ -26,7 +26,11 @@ tools live in [bin/](../bin/).
   sites are never added to recurring registrations. `archive-candidate
   list/show/review` exposes evidence-backed Codex completion claims; `review`
   accepts one or more candidate ids for individual or batch review. Acceptance
-  records user authority only and does not run Codex archival.
+  records signed user authority and invokes the narrow, capability-probed Codex
+  archive adapter once per stable session identity. `archive-session archive`,
+  `archive-session unarchive`, and `archive-session retry-candidate` expose the
+  direct directive, recovery, and authorized retry paths without editing Codex
+  Session files.
 - `shellm-docker-broker` is the host-side policy server for brokered
   Docker. It is never present in the mind's environment.
 - `shellm-explore` visualizes run trees, `pr-committee` runs multi-model
