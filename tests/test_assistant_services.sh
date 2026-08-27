@@ -61,6 +61,15 @@ check "Codex failure restarts only its supervised component" \
     grep -q '^Restart=on-failure$' "$REPO/deploy/headlong-assistant-codex@.service"
 check "Web failure restarts only its supervised component" \
     grep -q '^Restart=on-failure$' "$REPO/deploy/headlong-assistant-web@.service"
+check "Codex bridge death triggers the shared assistant alert" \
+    grep -q '^OnFailure=headlong-assistant-alert@codex-%i.service$' \
+        "$REPO/deploy/headlong-assistant-codex@.service"
+check "Web collector death triggers the shared assistant alert" \
+    grep -q '^OnFailure=headlong-assistant-alert@web-%i.service$' \
+        "$REPO/deploy/headlong-assistant-web@.service"
+check "assistant failure alert exposes only component and identity" \
+    bash -c 'grep -q "headlong-assistant-.*@.*\\.service" "$1" && ! grep -q "TOKEN.*printf\|KEY.*printf" "$1"' \
+        _ "$REPO/deploy/assistant-failure-alert.sh"
 check "bridge units do not place durable state in RuntimeDirectory" \
     bash -c '! grep -q ^RuntimeDirectory= "$1" "$2"' _ \
         "$REPO/deploy/headlong-assistant-codex@.service" \
@@ -106,7 +115,7 @@ else
     bad "proposal-only actor retains its pinned TLS trust paths"
 fi
 
-for unit in headlong-thinkers@.service headlong-assistant-codex@.service headlong-assistant-web@.service; do
+for unit in headlong-thinkers@.service headlong-assistant-codex@.service headlong-assistant-web@.service headlong-assistant-alert@.service; do
     sed "s|@SHELLM_HOME@|$WORK/deploy-home|g" "$REPO/deploy/$unit" >"$WORK/systemd/$unit"
 done
 cp "$REPO/deploy/headlong-assistant@.target" "$WORK/systemd/"
@@ -122,10 +131,12 @@ fi
 
 check "setup installs source units and target" \
     grep -q 'headlong-assistant-codex@ headlong-assistant-web@' "$REPO/deploy/setup.sh"
+check "setup installs the assistant failure alert unit" \
+    grep -q 'headlong-assistant-alert@' "$REPO/deploy/setup.sh"
 check "update restarts only active source bridge instances" \
     grep -q "try-restart 'headlong-assistant-codex@\*.service'" "$REPO/deploy/update.sh"
 check "assistant uninstall removes units without deleting identity state" \
-    bash -c 'grep -q headlong-assistant-codex@.service "$1" && ! grep -q "rm .*identit" "$1"' \
+    bash -c 'grep -q headlong-assistant-codex@.service "$1" && grep -q headlong-assistant-alert@.service "$1" && ! grep -q "rm .*identit" "$1"' \
         _ "$REPO/deploy/uninstall-assistant-services.sh"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

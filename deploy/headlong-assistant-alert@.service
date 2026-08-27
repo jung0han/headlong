@@ -1,0 +1,11 @@
+# Failure-open alert for one continuously supervised Personal Assistant bridge.
+
+[Unit]
+Description=headlong Personal Assistant bridge failure alert for %i
+
+[Service]
+Type=oneshot
+User=shellm
+WorkingDirectory=@SHELLM_HOME@/app
+EnvironmentFile=-@SHELLM_HOME@/app/.env
+ExecStart=/bin/bash @SHELLM_HOME@/app/deploy/assistant-failure-alert.sh @SHELLM_HOME@/app %i

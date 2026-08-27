@@ -32,6 +32,7 @@ from headlong_web import (
     knowledge,
     model_gateway,
     native_memory,
+    operational_health,
     proposals,
     reference_selection,
     references,
@@ -940,37 +941,44 @@ class PersonalAssistant:
                 archive_execution.ArchiveExecutionError,
             ) as exc:
                 raise AssistantError(str(exc)) from exc
+            self._write_archive_health()
         return {"archive_candidates": reviewed}
 
     def archive_codex_session(self, session_id: str) -> dict[str, Any]:
         """Execute one direct Archive Directive through the Codex adapter."""
         with self._state_lock():
             try:
-                return self._governance.execute_directive("archive", session_id)
+                result = self._governance.execute_directive("archive", session_id)
             except (
                 assistant_services.AssistantServiceError,
                 archive_execution.ArchiveExecutionError,
             ) as exc:
                 raise AssistantError(str(exc)) from exc
+            self._write_archive_health()
+            return result
 
     def unarchive_codex_session(self, session_id: str) -> dict[str, Any]:
         """Restore one identified session through the Codex adapter."""
         with self._state_lock():
             try:
-                return self._governance.execute_directive("unarchive", session_id)
+                result = self._governance.execute_directive("unarchive", session_id)
             except (
                 assistant_services.AssistantServiceError,
                 archive_execution.ArchiveExecutionError,
             ) as exc:
                 raise AssistantError(str(exc)) from exc
+            self._write_archive_health()
+            return result
 
     def retry_archive_candidate(self, candidate_id: str) -> dict[str, Any]:
         """Retry a failed accepted candidate without another approval prompt."""
         with self._state_lock():
             try:
-                return self._governance.retry_archive_candidate(candidate_id)
+                result = self._governance.retry_archive_candidate(candidate_id)
             except assistant_services.AssistantServiceError as exc:
                 raise AssistantError(str(exc)) from exc
+            self._write_archive_health()
+            return result
 
     def shadow_gate_report(self) -> dict[str, Any]:
         """Return the live, ledger-derived proposal-only evaluation report."""
@@ -1223,6 +1231,9 @@ class PersonalAssistant:
                 except native_memory.NativeMemoryError as exc:
                     raise AssistantError(str(exc)) from exc
             self._write_state_json(snapshot_path, native_memory.snapshot(current))
+            operational_health.record_native_memory(
+                self.state_dir, active=len(current), mutations=result
+            )
         return result
 
     def rebuild_native_memory(self) -> dict[str, int]:
@@ -1236,6 +1247,9 @@ class PersonalAssistant:
                 native_memory.rebuild_store(self.identity.path / "memories", current)
                 native_memory.invalidate_retrieval(self.identity.path)
                 self._write_state_json(snapshot_path, native_memory.snapshot(current))
+                operational_health.record_native_memory(
+                    self.state_dir, active=len(current)
+                )
             except native_memory.NativeMemoryError as exc:
                 raise AssistantError(str(exc)) from exc
         return {"active": len(current), "tombstoned": tombstoned}
@@ -1245,6 +1259,7 @@ class PersonalAssistant:
         snapshot_path = self.state_dir / "native-memory" / "snapshot.json"
         with self._state_lock():
             events = self._native_memory_ledger_events()
+            restored = False
             try:
                 current, tombstones, last_events = native_memory.replay_details(events)
                 matches = [
@@ -1291,12 +1306,18 @@ class PersonalAssistant:
                         },
                     )
                     self._append_event(event)
+                    restored = True
                     current, tombstones, _last_events = native_memory.replay_details(
                         [*events, event]
                     )
                 native_memory.rebuild_store(self.identity.path / "memories", current)
                 native_memory.invalidate_retrieval(self.identity.path)
                 self._write_state_json(snapshot_path, native_memory.snapshot(current))
+                operational_health.record_native_memory(
+                    self.state_dir,
+                    active=len(current),
+                    mutations={"restored": int(restored)},
+                )
             except native_memory.NativeMemoryError as exc:
                 raise AssistantError(str(exc)) from exc
         return {"memory_id": memory_id, "status": "active"}
@@ -2026,7 +2047,20 @@ class PersonalAssistant:
                 self._append_event(event)
                 ledger_ids.add(event["event_id"])
                 created += 1
+        self._write_archive_health()
         return created
+
+    def _write_archive_health(self) -> None:
+        try:
+            operational_health.record_archive(self.state_dir, self._ledger.events())
+        except (
+            OSError,
+            archive_candidates.ArchiveCandidateError,
+            archive_execution.ArchiveExecutionError,
+        ):
+            # The signed Activity Ledger is authoritative; the compact marker
+            # can be refreshed by the next candidate or archive operation.
+            pass
 
     def _materialize_memory_candidates(
         self, analysis: dict[str, Any], ledger_ids: set[str]

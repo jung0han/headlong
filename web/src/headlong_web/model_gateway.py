@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from headlong_web import control, discovery, envfile
+from headlong_web import control, discovery, envfile, operational_health
 
 
 class ModelGatewayError(RuntimeError):
@@ -115,11 +115,12 @@ class ModelGateway:
         schema: StructuredResultSchema,
     ) -> dict[str, Any]:
         """Return one locally validated result using the route's best schema mode."""
-        env = self._route_env()
-        mode = _structured_mode(env)
-        attempts = 1 if mode == "strict" else 2
+        mode = "unknown"
         schema_path: Path | None = None
         try:
+            env = self._route_env()
+            mode = _structured_mode(env)
+            attempts = 1 if mode == "strict" else 2
             if mode == "strict":
                 with tempfile.NamedTemporaryFile(
                     mode="w", encoding="utf-8", suffix=".json", delete=False
@@ -152,7 +153,9 @@ class ModelGateway:
                     value = json.loads(output)
                     if not isinstance(value, dict):
                         raise ValueError("result is not an object")
-                    return schema.validate(value)
+                    validated = schema.validate(value)
+                    self._record_structured(mode=mode, success=True)
+                    return validated
                 except json.JSONDecodeError:
                     last_error = "returned invalid JSON"
                 except ValueError as exc:
@@ -160,9 +163,28 @@ class ModelGateway:
                 except ModelResultInvalidError as exc:
                     last_error = str(exc)
             raise ModelGatewayError(f"{operation} {last_error}")
+        except ModelGatewayError:
+            self._record_structured(
+                mode=mode, success=False, error_code="invalid_result"
+            )
+            raise
         finally:
             if schema_path is not None:
                 schema_path.unlink(missing_ok=True)
+
+    def _record_structured(
+        self, *, mode: str, success: bool, error_code: str | None = None
+    ) -> None:
+        try:
+            operational_health.record_structured_result(
+                self.identity.path,
+                mode=mode,
+                success=success,
+                error_code=error_code,
+            )
+        except OSError:
+            # The result contract stays authoritative; health is diagnostic.
+            pass
 
     def _route_env(self) -> dict[str, str]:
         """Resolve route configuration with the same root/identity precedence as llm."""

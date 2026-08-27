@@ -5,6 +5,7 @@ Description=headlong Codex bridge for Observer Identity %i
 After=network-online.target
 Wants=network-online.target
 PartOf=headlong-assistant@%i.target
+OnFailure=headlong-assistant-alert@codex-%i.service
 
 [Service]
 Type=simple
@@ -17,6 +18,17 @@ ExecStart=/bin/bash @SHELLM_HOME@/app/deploy/assistant-service.sh @SHELLM_HOME@/
 Restart=on-failure
 RestartSec=10
 TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=@SHELLM_HOME@/app/.identities/%i @SHELLM_HOME@/app/.assistant-authority @SHELLM_HOME@/app/.assistant-observers
 
 [Install]
 WantedBy=headlong-assistant@%i.target
