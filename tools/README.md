@@ -18,6 +18,10 @@ tools live in [bin/](../bin/).
   and `reference list/show` manage bounded public sources and their immutable
   saved revisions. Pass `web-source add --kind url|rss|documentation` to
   classify every recurring source while keeping one refresh boundary.
+  `explore-web MEMORY --trigger-kind interest|open_loop` performs a one-time
+  public search/follow run from an authorized memory record. Its page, link
+  depth, elapsed-time, and stored-byte limits are deterministic; discovered
+  sites are never added to recurring registrations.
 - `shellm-docker-broker` is the host-side policy server for brokered
   Docker. It is never present in the mind's environment.
 - `shellm-explore` visualizes run trees, `pr-committee` runs multi-model

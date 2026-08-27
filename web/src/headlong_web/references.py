@@ -57,6 +57,7 @@ class FetchedDocument:
     media_type: str
     text: str
     resolved_url: str | None = None
+    links: tuple[str, ...] = ()
 
     @property
     def digest(self) -> str:
@@ -374,6 +375,7 @@ def fetch_public_document(
         media_type=media_type,
         text=text,
         resolved_url=url if url != source_url else None,
+        links=extract_public_links(decoded, media_type, url),
     )
 
 
@@ -450,6 +452,48 @@ class _TextExtractor(HTMLParser):
     def handle_data(self, data: str) -> None:
         if not self.skip_depth:
             self.parts.append(data)
+
+
+class _LinkExtractor(HTMLParser):
+    _SKIP = _TextExtractor._SKIP
+
+    def __init__(self, base_url: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self.base_url = base_url
+        self.skip_depth = 0
+        self.links: list[str] = []
+        self._seen: set[str] = set()
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in self._SKIP:
+            self.skip_depth += 1
+            return
+        if self.skip_depth or tag not in {"a", "area", "link"}:
+            return
+        href = next((value for name, value in attrs if name == "href"), None)
+        if not href:
+            return
+        try:
+            url = canonical_public_url(parse.urljoin(self.base_url, href))
+        except ReferenceError:
+            return
+        if url not in self._seen:
+            self._seen.add(url)
+            self.links.append(url)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in self._SKIP and self.skip_depth:
+            self.skip_depth -= 1
+
+
+def extract_public_links(text: str, media_type: str, base_url: str) -> tuple[str, ...]:
+    """Extract stable public HTTP(S) links without resolving or fetching them."""
+    if media_type not in {"text/html", "application/xhtml+xml"}:
+        return ()
+    parser = _LinkExtractor(base_url)
+    parser.feed(text)
+    parser.close()
+    return tuple(parser.links)
 
 
 def sanitize_document(text: str, media_type: str) -> str:
@@ -609,6 +653,24 @@ def read_rejection(
     ):
         raise ReferenceError("invalid Reference rejection metadata", code="storage_failed")
     return metadata
+
+
+def list_rejections(identity_dir: Path) -> list[dict[str, Any]]:
+    """List compact rejection evidence without exposing rejected bodies."""
+    base = rejection_root(identity_dir)
+    if not base.is_dir():
+        return []
+    result: list[dict[str, Any]] = []
+    for metadata_path in sorted(base.glob("web-*/*/metadata.json")):
+        source = metadata_path.parent.parent.name
+        digest = metadata_path.parent.name
+        item = read_rejection(identity_dir, source, digest)
+        if item is not None:
+            result.append(item)
+    result.sort(
+        key=lambda item: (item["rejected_at"], item["source_id"]), reverse=True
+    )
+    return result
 
 
 def store_rejection(
