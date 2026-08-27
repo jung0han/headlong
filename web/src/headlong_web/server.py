@@ -25,6 +25,7 @@ from starlette.background import BackgroundTask
 from headlong_web import (
     activity,
     assistant,
+    assistant_runtime,
     chat,
     control,
     discovery,
@@ -358,7 +359,14 @@ def create_app(
                 if traj_dir is not None
                 else None
             ),
+            "assistant": assistant_runtime.public_health(root, identity),
         }
+
+    @app.get("/api/identities/{identity_id}/assistant/health")
+    def identity_assistant_health(identity_id: str) -> dict:
+        """Bounded operational status; source bodies and secrets are excluded."""
+        identity = _identity_or_404(root, identity_id)
+        return assistant_runtime.public_health(root, identity)
 
     @app.get("/api/identities/{identity_id}/mindlog")
     def mindlog(

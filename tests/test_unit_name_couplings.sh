@@ -103,6 +103,15 @@ for u in "$REPO"/deploy/*.service; do
 done
 [[ $missing -eq 0 ]] && ok "every shipped .service is referenced by a deploy script"
 
+if grep -rqF "headlong-assistant@.target" "$REPO/deploy/setup.sh" "$REPO/deploy/update.sh" \
+    && grep -qF "headlong-thinkers@%i.service" "$REPO/deploy/headlong-assistant@.target" \
+    && grep -qF "headlong-assistant-codex@%i.service" "$REPO/deploy/headlong-assistant@.target" \
+    && grep -qF "headlong-assistant-web@%i.service" "$REPO/deploy/headlong-assistant@.target"; then
+    ok "Personal Assistant target groups the existing mind and both source bridges"
+else
+    bad "Personal Assistant target groups the existing mind and both source bridges"
+fi
+
 # --- 5. no stale references to a unit name we no longer ship -------------
 # Catches a half-finished rename: code still naming the old unit.
 shipped=$(cd "$REPO/deploy" && ls *.service 2>/dev/null | sed 's/\.service$//' | sed 's/@$//')

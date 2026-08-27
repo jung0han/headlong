@@ -59,6 +59,27 @@ for unit_tpl in headlong-thinkers@ headlong-thinkers-alert@; do
         sudo systemctl daemon-reload
     fi
 done
+
+# Personal Assistant target + independently supervised source bridges. Keep
+# cursor and projection state in the identity directory; only running bridge
+# processes are restarted after code or unit updates.
+for unit_tpl in headlong-assistant-codex@ headlong-assistant-web@; do
+    unit_src="$APP_DIR/deploy/${unit_tpl}.service"
+    [[ -f "$unit_src" ]] || continue
+    rendered=$(sed "s|@SHELLM_HOME@|$SHELLM_HOME|g" "$unit_src")
+    if ! printf '%s\n' "$rendered" | cmp -s - "/etc/systemd/system/${unit_tpl}.service" 2>/dev/null; then
+        echo "==> Unit file changed — re-installing ${unit_tpl}"
+        printf '%s\n' "$rendered" | sudo tee "/etc/systemd/system/${unit_tpl}.service" >/dev/null
+        sudo systemctl daemon-reload
+    fi
+done
+assistant_target="$APP_DIR/deploy/headlong-assistant@.target"
+if [[ -f "$assistant_target" ]] \
+    && ! cmp -s "$assistant_target" /etc/systemd/system/headlong-assistant@.target 2>/dev/null; then
+    echo "==> Installing headlong-assistant@ target"
+    sudo install -o root -g root -m 0644 "$assistant_target" /etc/systemd/system/headlong-assistant@.target
+    sudo systemctl daemon-reload
+fi
 # Single name only — the headlong rename ships no wrapper compat. Legacy
 # copies are swept so nothing on the box can still invoke a wrapper that
 # targets units which no longer exist.
@@ -93,6 +114,11 @@ if [[ -f "$APP_DIR/deploy/audit-headlong-signals.rules" ]] \
     sudo rm -f /etc/audit/rules.d/shelly-signals.rules /etc/audit/rules.d/shellm-signals.rules
     sudo augenrules --load || echo "==> WARN: augenrules --load failed — rules apply after next reboot" >&2
 fi
+
+# Restart only active source bridges. The existing thinker dispatcher keeps
+# running, while systemd picks up bridge code and preserves durable state.
+sudo systemctl try-restart 'headlong-assistant-codex@*.service' >/dev/null 2>&1 || true
+sudo systemctl try-restart 'headlong-assistant-web@*.service' >/dev/null 2>&1 || true
 
 # Optional component: Slack bridge (installed on boxes provisioned with
 # SHELLM_INSTALL_SLACK_BRIDGE=1). Re-sync its units + deps and restart the

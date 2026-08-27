@@ -23,6 +23,9 @@ Description=headlong thinkers for identity %i
 # root .env, identity .env, and activate itself on every start.
 After=network-online.target
 Wants=network-online.target
+# When this identity is operated as a Personal Assistant, target-level stop
+# and restart include the existing mind without changing its unit identity.
+PartOf=headlong-assistant@%i.target
 # With Restart=on-failure (below), OnFailure fires only once the start
 # limit is exhausted — it now means "died repeatedly, auto-restart GAVE UP,
 # staying down" (deploy/thinkers-failure-alert.sh). Per-death and
