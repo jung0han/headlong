@@ -1251,7 +1251,9 @@ class PersonalAssistant:
 
             if result["errors"] or result["failed"]:
                 result["status"] = "degraded"
-            result["work_proposals_created"] = self._sync_work_proposals(ledger_ids)
+            result["work_proposals_created"] = self._sync_improvement_proposals(
+                ledger_ids
+            )
             result["sessions"] = session_health
             self._write_source_health("codex", "analysis", result)
         return result
@@ -1342,9 +1344,14 @@ class PersonalAssistant:
             "evidence_locators (non-empty array of supplied locator strings), "
             "memory_candidates (array of objects with exactly content and "
             "evidence_locators), and improvement_signals (array of objects with "
-            "exactly kind, content, and evidence_locators). Allowed signal kinds are "
+            "exactly kind, proposal_type, content, and evidence_locators). "
+            "proposal_type is work or observer. Allowed signal kinds are "
             "user_correction, test_failure, tool_failure, reviewer_finding, "
-            "inferred_pattern, and open_loop. Every conclusion must cite one or more "
+            "observer_failure, observer_regression, inferred_pattern, and open_loop. "
+            "Unsupported self-evaluation and mere design preference are not signals. "
+            "Observer means this Personal "
+            "Assistant's code, prompt, skill, or operating configuration. Every "
+            "conclusion must cite one or more "
             "supplied locators. Be compact and do not copy complete tool payloads."
         )
         prompt = (
@@ -1402,6 +1409,8 @@ class PersonalAssistant:
         if previous is not None and previous.get("source_revision_digest") == digest:
             previous["source_root"] = source.source_root
             previous["relative_path"] = source.relative_path
+            previous["task_root_id"] = source.task_root_id
+            previous["parent_session_id"] = source.parent_session_id
             previous["last_evidence_locator"] = last_locator.to_dict()
             self._write_codex_analysis_state(source.id, previous)
             return previous
@@ -1430,6 +1439,8 @@ class PersonalAssistant:
         state = {
             "schema": ANALYSIS_STATE_SCHEMA,
             "session_id": source.id,
+            "task_root_id": source.task_root_id,
+            "parent_session_id": source.parent_session_id,
             "project_id": project.id,
             "source_root": source.source_root,
             "relative_path": source.relative_path,
@@ -1528,20 +1539,39 @@ class PersonalAssistant:
             if step.get("step_id")
         }
 
-    def _sync_work_proposals(self, ledger_ids: set[str]) -> int:
-        """Materialize every missing direct-evidence proposal idempotently."""
+    def _sync_improvement_proposals(self, ledger_ids: set[str]) -> int:
+        """Materialize direct and thresholded pattern proposals idempotently."""
         created = 0
-        analyses = self._ledger_events()
-        for analysis in analyses:
+        ledger = self._ledger_events()
+        candidates: list[dict[str, Any]] = []
+        for analysis in ledger:
             try:
-                candidates = proposals.work_proposal_events(analysis)
+                candidates.extend(proposals.direct_proposal_events(analysis))
             except proposals.ProposalError as exc:
                 raise AssistantError(str(exc)) from exc
-            for event in candidates:
-                if event["event_id"] in ledger_ids:
-                    continue
+        try:
+            candidates.extend(proposals.inferred_pattern_proposal_events(ledger))
+            current = {
+                item["proposal_id"]: item for item in proposals.build_inbox(ledger)
+            }
+        except proposals.ProposalError as exc:
+            raise AssistantError(str(exc)) from exc
+        for event in candidates:
+            if event["event_id"] not in ledger_ids:
                 self._append_event(event)
                 ledger_ids.add(event["event_id"])
+                created += 1
+                current[event["event_id"]] = proposals.build_inbox([event])[0]
+                continue
+            try:
+                update = proposals.evidence_update_event(
+                    event, current[event["event_id"]]
+                )
+            except (KeyError, proposals.ProposalError) as exc:
+                raise AssistantError(str(exc)) from exc
+            if update is not None and update["event_id"] not in ledger_ids:
+                self._append_event(update)
+                ledger_ids.add(update["event_id"])
                 created += 1
         return created
 
@@ -1902,6 +1932,8 @@ def analysis_event(
             "analysis_kind": analysis_kind,
             "analysis_state": analysis_kind,
             "analysis_schema": ANALYSIS_SCHEMA,
+            "task_root_id": source.task_root_id,
+            "parent_session_id": source.parent_session_id,
             "source_revision_digest": state["source_revision_digest"],
             "memory_candidates": analysis["memory_candidates"],
             "improvement_signals": analysis["improvement_signals"],
@@ -2014,6 +2046,8 @@ def source_event(
         details={
             "source_event_schema": SOURCE_EVENT_SCHEMA,
             "source_event_type": source_type,
+            "task_root_id": source.task_root_id,
+            "parent_session_id": source.parent_session_id,
         },
     )
 

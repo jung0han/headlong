@@ -29,7 +29,7 @@ import type {
   ThinkersStatus,
   TreeNode,
   ProposalReviewState,
-  WorkImprovementProposal,
+  ImprovementProposal,
 } from "~/lib/types";
 
 export const API_BASE = import.meta.env.VITE_API_URL ?? "";
@@ -202,14 +202,14 @@ export function fetchMemory(
 
 export function fetchProposals(
   identityId: string
-): Promise<WorkImprovementProposal[]> {
+): Promise<ImprovementProposal[]> {
   return getJson(`/api/identities/${encodeURIComponent(identityId)}/proposals`);
 }
 
 export function fetchProposal(
   identityId: string,
   proposalId: string
-): Promise<WorkImprovementProposal> {
+): Promise<ImprovementProposal> {
   return getJson(
     `/api/identities/${encodeURIComponent(identityId)}/proposals/${encodeURIComponent(proposalId)}`
   );
@@ -219,7 +219,7 @@ export function reviewProposal(
   identityId: string,
   proposalId: string,
   state: ProposalReviewState
-): Promise<WorkImprovementProposal> {
+): Promise<ImprovementProposal> {
   return postJson(
     `/api/identities/${encodeURIComponent(identityId)}/proposals/${encodeURIComponent(proposalId)}/review`,
     { state }
