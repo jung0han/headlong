@@ -15,5 +15,6 @@ export default [
   route("i/:identityId/chat", "routes/chat.tsx"),
   route("i/:identityId/memories", "routes/memories.tsx"),
   route("i/:identityId/proposals", "routes/proposals.tsx"),
+  route("i/:identityId/shadow", "routes/shadow.tsx"),
   route("i/:identityId/config", "routes/config.tsx"),
 ] satisfies RouteConfig;
