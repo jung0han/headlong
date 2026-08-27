@@ -109,7 +109,7 @@ systemctl daemon-reload
 # have no identity yet, so installation is unconditional and activation is an
 # explicit opt-in once the Observer exists.
 echo "==> Installing Personal Assistant source-bridge units"
-for unit_tpl in headlong-assistant-codex@ headlong-assistant-web@; do
+for unit_tpl in headlong-assistant-codex@ headlong-assistant-web@ headlong-assistant-alert@; do
     sed "s|@SHELLM_HOME@|$SHELLM_HOME|g" "$SCRIPT_DIR/${unit_tpl}.service" \
         > "/etc/systemd/system/${unit_tpl}.service"
 done

@@ -63,7 +63,7 @@ done
 # Personal Assistant target + independently supervised source bridges. Keep
 # cursor and projection state in the identity directory; only running bridge
 # processes are restarted after code or unit updates.
-for unit_tpl in headlong-assistant-codex@ headlong-assistant-web@; do
+for unit_tpl in headlong-assistant-codex@ headlong-assistant-web@ headlong-assistant-alert@; do
     unit_src="$APP_DIR/deploy/${unit_tpl}.service"
     [[ -f "$unit_src" ]] || continue
     rendered=$(sed "s|@SHELLM_HOME@|$SHELLM_HOME|g" "$unit_src")

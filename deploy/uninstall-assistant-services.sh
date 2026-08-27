@@ -20,12 +20,14 @@ done
 for path in \
     /etc/systemd/system/headlong-assistant-codex@.service \
     /etc/systemd/system/headlong-assistant-web@.service \
+    /etc/systemd/system/headlong-assistant-alert@.service \
     /etc/systemd/system/headlong-assistant@.target; do
     rm -f "$path"
 done
 systemctl daemon-reload
 systemctl reset-failed 'headlong-assistant-codex@*.service' \
-    'headlong-assistant-web@*.service' 'headlong-assistant@*.target' \
+    'headlong-assistant-web@*.service' 'headlong-assistant-alert@*.service' \
+    'headlong-assistant@*.target' \
     >/dev/null 2>&1 || true
 
 echo "Personal Assistant services removed; Observer Identity state was preserved."

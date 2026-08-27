@@ -30,7 +30,11 @@ tools live in [bin/](../bin/).
   archive adapter once per stable session identity. `archive-session archive`,
   `archive-session unarchive`, and `archive-session retry-candidate` expose the
   direct directive, recovery, and authorized retry paths without editing Codex
-  Session files.
+  Session files. `status` returns bounded operational health for current
+  collection, newly eligible analysis, Historical Backfill, native-memory
+  capture, Structured Model Results, Archive Candidate review, and authorized
+  archive execution. `native-memory rebuild/restore` recovers the native
+  Markdown store from its Activity Ledger history.
 - `shellm-docker-broker` is the host-side policy server for brokered
   Docker. It is never present in the mind's environment.
 - `shellm-explore` visualizes run trees, `pr-committee` runs multi-model
