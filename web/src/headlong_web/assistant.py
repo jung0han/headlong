@@ -25,6 +25,7 @@ from headlong_web import (
     codex_analysis,
     control,
     discovery,
+    hacker_news,
     proposals,
     references,
     trajectory,
@@ -45,7 +46,7 @@ ANALYSIS_SCHEMA = codex_analysis.ANALYSIS_SCHEMA
 ANALYSIS_STATE_SCHEMA = codex_analysis.ANALYSIS_STATE_SCHEMA
 WEB_SELECTION_SCHEMA = "headlong.web-reference-selection/v1"
 SOURCE_EVENT_SCHEMA = "headlong.codex-source-event/v1"
-WEB_SOURCE_KINDS = {"url", "rss", "documentation"}
+WEB_SOURCE_KINDS = {"url", "rss", "documentation", "hacker_news"}
 _EVENT_NAMESPACE = uuid.UUID("88d66cf8-0918-4593-974e-71e544b6fd5b")
 _MAX_TITLE = 160
 _MAX_OBSERVATION = 1200
@@ -282,7 +283,11 @@ class PersonalAssistant:
         if kind not in WEB_SOURCE_KINDS:
             raise AssistantError(f"unsupported Registered Web Source kind: {kind}")
         try:
-            canonical = references.canonical_public_url(url)
+            canonical = (
+                hacker_news.canonical_source_url(url)
+                if kind == "hacker_news"
+                else references.canonical_public_url(url)
+            )
         except references.ReferenceError as exc:
             raise AssistantError(str(exc)) from exc
         source = RegisteredWebSource(
@@ -380,6 +385,51 @@ class PersonalAssistant:
             result["registered"] = len(sources)
             for source in sources:
                 attempted_at = _utc_now()
+                if source.kind == "hacker_news":
+                    try:
+                        collection = hacker_news.collect(
+                            fetch=references.fetch_public_document
+                        )
+                    except references.ReferenceError as exc:
+                        self._record_web_failure(
+                            source, attempted_at, "hacker_news", exc.code, result
+                        )
+                        continue
+                    result["fetched"] += len(collection.documents)
+                    result["duplicate"] += collection.duplicates
+                    failures_before = result["failed"]
+                    for failure in collection.failures:
+                        self._record_web_failure(
+                            source,
+                            attempted_at,
+                            failure.phase,
+                            failure.code,
+                            result,
+                            write_health=False,
+                        )
+                    for document in collection.documents:
+                        self._consider_web_document(
+                            source,
+                            document,
+                            attempted_at,
+                            result,
+                            write_health=False,
+                        )
+                    if result["failed"] > failures_before:
+                        self._write_web_health(
+                            source,
+                            attempted_at,
+                            status="error",
+                            phase="hacker_news_partial",
+                            error_code="partial_failure",
+                            result=result,
+                            count_health_failure=False,
+                        )
+                    else:
+                        self._record_web_success(
+                            source, attempted_at, collection.digest, result
+                        )
+                    continue
                 try:
                     document = references.fetch_public_document(source.url)
                 except references.ReferenceError as exc:
@@ -402,117 +452,146 @@ class PersonalAssistant:
                         result,
                     )
                     continue
-                try:
-                    existing = references.read_reference(
-                        self.identity.path,
-                        source.id,
-                        document.digest,
-                        include_text=False,
-                    )
-                except references.ReferenceError as exc:
-                    self._record_web_failure(
-                        source, attempted_at, "storage", exc.code, result
-                    )
-                    continue
-                if existing is not None:
-                    event = reference_revision_event(existing)
-                    try:
-                        if not self._ledger_has(event["event_id"]):
-                            self._append_event(event)
-                    except AssistantError:
-                        self._record_web_failure(
-                            source, attempted_at, "ledger", "ledger_failed", result
-                        )
-                        continue
-                    result["duplicate"] += 1
-                    self._record_web_success(source, attempted_at, document.digest, result)
-                    continue
-                try:
-                    rejected = references.read_rejection(
-                        self.identity.path, source.id, document.digest
-                    )
-                except references.ReferenceError as exc:
-                    self._record_web_failure(
-                        source, attempted_at, "storage", exc.code, result
-                    )
-                    continue
-                if rejected is not None:
-                    event = reference_rejection_event(rejected)
-                    try:
-                        if not self._ledger_has(event["event_id"]):
-                            self._append_event(event)
-                    except AssistantError:
-                        self._record_web_failure(
-                            source, attempted_at, "ledger", "ledger_failed", result
-                        )
-                        continue
-                    result["duplicate"] += 1
-                    result["not_selected"] += 1
-                    self._record_web_success(source, attempted_at, document.digest, result)
-                    continue
-                try:
-                    selection = self._select_reference(source, document)
-                except AssistantError:
-                    self._record_web_failure(
-                        source, attempted_at, "selection", "selection_failed", result
-                    )
-                    continue
-                if not selection["selected"]:
-                    judgment = str(
-                        selection["summary"]
-                        or selection["title"]
-                        or "not selected by the Reference selector"
-                    )
-                    try:
-                        rejected, _created = references.store_rejection(
-                            self.identity.path,
-                            document,
-                            rejected_at=attempted_at,
-                            judgment=judgment,
-                        )
-                    except references.ReferenceError as exc:
-                        self._record_web_failure(
-                            source, attempted_at, "storage", exc.code, result
-                        )
-                        continue
-                    event = reference_rejection_event(rejected)
-                    try:
-                        if not self._ledger_has(event["event_id"]):
-                            self._append_event(event)
-                    except AssistantError:
-                        self._record_web_failure(
-                            source, attempted_at, "ledger", "ledger_failed", result
-                        )
-                        continue
-                    result["not_selected"] += 1
-                    self._record_web_success(source, attempted_at, document.digest, result)
-                    continue
-                result["selected"] += 1
-                try:
-                    metadata, created = references.store_reference(
-                        self.identity.path,
-                        document,
-                        fetched_at=_utc_now(),
-                        title=selection["title"],
-                        summary=selection["summary"],
-                    )
-                except references.ReferenceError as exc:
-                    self._record_web_failure(
-                        source, attempted_at, "storage", exc.code, result
-                    )
-                    continue
-                event = reference_revision_event(metadata)
-                try:
-                    if not self._ledger_has(event["event_id"]):
-                        self._append_event(event)
-                except AssistantError:
-                    self._record_web_failure(
-                        source, attempted_at, "ledger", "ledger_failed", result
-                    )
-                    continue
-                result["saved" if created else "duplicate"] += 1
-                self._record_web_success(source, attempted_at, document.digest, result)
+                self._consider_web_document(source, document, attempted_at, result)
         return result
+
+    def _consider_web_document(
+        self,
+        source: RegisteredWebSource,
+        document: references.FetchedDocument,
+        attempted_at: str,
+        result: dict[str, Any],
+        *,
+        write_health: bool = True,
+    ) -> None:
+        """Apply the shared selection and immutable-store boundary to one document."""
+        document_source_id = references.source_id(document.source_url)
+        try:
+            existing = references.read_reference(
+                self.identity.path,
+                document_source_id,
+                document.digest,
+                include_text=False,
+            )
+        except references.ReferenceError as exc:
+            self._record_web_failure(
+                source, attempted_at, "storage", exc.code, result,
+                write_health=write_health,
+            )
+            return
+        if existing is not None:
+            event = reference_revision_event(existing)
+            try:
+                if not self._ledger_has(event["event_id"]):
+                    self._append_event(event)
+            except AssistantError:
+                self._record_web_failure(
+                    source, attempted_at, "ledger", "ledger_failed", result,
+                    write_health=write_health,
+                )
+                return
+            result["duplicate"] += 1
+            if write_health:
+                self._record_web_success(source, attempted_at, document.digest, result)
+            return
+        try:
+            rejected = references.read_rejection(
+                self.identity.path, document_source_id, document.digest
+            )
+        except references.ReferenceError as exc:
+            self._record_web_failure(
+                source, attempted_at, "storage", exc.code, result,
+                write_health=write_health,
+            )
+            return
+        if rejected is not None:
+            event = reference_rejection_event(rejected)
+            try:
+                if not self._ledger_has(event["event_id"]):
+                    self._append_event(event)
+            except AssistantError:
+                self._record_web_failure(
+                    source, attempted_at, "ledger", "ledger_failed", result,
+                    write_health=write_health,
+                )
+                return
+            result["duplicate"] += 1
+            result["not_selected"] += 1
+            if write_health:
+                self._record_web_success(source, attempted_at, document.digest, result)
+            return
+        selection_source = RegisteredWebSource(
+            document_source_id, source.name, document.source_url, source.kind
+        )
+        try:
+            selection = self._select_reference(selection_source, document)
+        except AssistantError:
+            self._record_web_failure(
+                source, attempted_at, "selection", "selection_failed", result,
+                write_health=write_health,
+            )
+            return
+        if not selection["selected"]:
+            judgment = str(
+                selection["summary"]
+                or selection["title"]
+                or "not selected by the Reference selector"
+            )
+            try:
+                rejected, _created = references.store_rejection(
+                    self.identity.path,
+                    document,
+                    rejected_at=attempted_at,
+                    judgment=judgment,
+                )
+            except references.ReferenceError as exc:
+                self._record_web_failure(
+                    source, attempted_at, "storage", exc.code, result,
+                    write_health=write_health,
+                )
+                return
+            event = reference_rejection_event(rejected)
+            try:
+                if not self._ledger_has(event["event_id"]):
+                    self._append_event(event)
+            except AssistantError:
+                self._record_web_failure(
+                    source, attempted_at, "ledger", "ledger_failed", result,
+                    write_health=write_health,
+                )
+                return
+            result["not_selected"] += 1
+            if write_health:
+                self._record_web_success(source, attempted_at, document.digest, result)
+            return
+        result["selected"] += 1
+        try:
+            metadata, created = references.store_reference(
+                self.identity.path,
+                document,
+                fetched_at=_utc_now(),
+                title=selection["title"],
+                summary=selection["summary"],
+            )
+        except references.ReferenceError as exc:
+            self._record_web_failure(
+                source, attempted_at, "storage", exc.code, result,
+                write_health=write_health,
+            )
+            return
+        event = reference_revision_event(metadata)
+        try:
+            if not self._ledger_has(event["event_id"]):
+                self._append_event(event)
+        except AssistantError:
+            self._record_web_failure(
+                source, attempted_at, "ledger", "ledger_failed", result,
+                write_health=write_health,
+            )
+            return
+        result["saved" if created else "duplicate"] += 1
+        if write_health:
+            self._record_web_success(source, attempted_at, document.digest, result)
 
     def web_source_health(self) -> list[dict[str, Any]]:
         try:
@@ -527,21 +606,15 @@ class PersonalAssistant:
         digest: str,
         result: dict[str, Any],
     ) -> None:
-        try:
-            references.write_source_health(
-                self.identity.path,
-                source_id_value=source.id,
-                source_kind=source.kind,
-                attempted_at=attempted_at,
-                status="healthy",
-                phase="complete",
-                digest=digest,
-            )
-        except references.ReferenceError:
-            result["failed"] += 1
-            result["failures"].append(
-                {"source_id": source.id, "phase": "health", "code": "storage_failed"}
-            )
+        self._write_web_health(
+            source,
+            attempted_at,
+            status="healthy",
+            phase="complete",
+            digest=digest,
+            result=result,
+            count_health_failure=True,
+        )
 
     def _record_web_failure(
         self,
@@ -550,22 +623,50 @@ class PersonalAssistant:
         phase: str,
         code: str,
         result: dict[str, Any],
+        *,
+        write_health: bool = True,
     ) -> None:
         result["failed"] += 1
         result["failures"].append(
             {"source_id": source.id, "phase": phase, "code": code[:80]}
         )
+        if write_health:
+            self._write_web_health(
+                source,
+                attempted_at,
+                status="error",
+                phase=phase,
+                error_code=code,
+                result=result,
+                count_health_failure=False,
+            )
+
+    def _write_web_health(
+        self,
+        source: RegisteredWebSource,
+        attempted_at: str,
+        *,
+        status: str,
+        phase: str,
+        result: dict[str, Any],
+        digest: str | None = None,
+        error_code: str | None = None,
+        count_health_failure: bool,
+    ) -> None:
         try:
             references.write_source_health(
                 self.identity.path,
                 source_id_value=source.id,
                 source_kind=source.kind,
                 attempted_at=attempted_at,
-                status="error",
+                status=status,
                 phase=phase,
-                error_code=code,
+                digest=digest,
+                error_code=error_code,
             )
         except references.ReferenceError:
+            if count_health_failure:
+                result["failed"] += 1
             result["failures"].append(
                 {"source_id": source.id, "phase": "health", "code": "storage_failed"}
             )

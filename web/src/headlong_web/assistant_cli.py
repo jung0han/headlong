@@ -37,7 +37,9 @@ def build_parser() -> argparse.ArgumentParser:
     web_add.add_argument("url")
     web_add.add_argument("--name")
     web_add.add_argument(
-        "--kind", choices=("url", "rss", "documentation"), default="url"
+        "--kind",
+        choices=("url", "rss", "documentation", "hacker_news"),
+        default="url",
     )
     web_commands.add_parser("list")
     web_commands.add_parser("health")

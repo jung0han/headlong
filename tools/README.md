@@ -16,8 +16,10 @@ tools live in [bin/](../bin/).
   while `process-codex` also emits due Provisional Analysis and Final
   Consolidation records. `web-source add/list/remove/health`, `observe-web`,
   and `reference list/show` manage bounded public sources and their immutable
-  saved revisions. Pass `web-source add --kind url|rss|documentation` to
-  classify every recurring source while keeping one refresh boundary.
+  saved revisions. Pass
+  `web-source add --kind url|rss|documentation|hacker_news`; the Hacker News
+  kind accepts `https://news.ycombinator.com/` and collects a bounded top-story
+  slice while keeping the same selection, health, and revision boundaries.
 - `shellm-docker-broker` is the host-side policy server for brokered
   Docker. It is never present in the mind's environment.
 - `shellm-explore` visualizes run trees, `pr-committee` runs multi-model
