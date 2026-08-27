@@ -84,6 +84,24 @@ def build_parser() -> argparse.ArgumentParser:
     _memory_authority_args(accept)
     memory_commands.add_parser("rebuild")
 
+    context = commands.add_parser(
+        "context", help="assemble scoped Active Memory and Reference context"
+    )
+    context.add_argument("query")
+    context.add_argument("--project")
+
+    respond = commands.add_parser(
+        "respond", help="answer with scoped Active Memory and Reference evidence"
+    )
+    respond.add_argument("query")
+    respond.add_argument("--project")
+
+    response_evidence = commands.add_parser(
+        "resolve-response-evidence",
+        help="resolve a response Evidence Locator to its ledger event or Reference",
+    )
+    response_evidence.add_argument("locator", help="Evidence Locator JSON object")
+
     follow = commands.add_parser("follow-codex", help="collect active Codex records once")
     _source_root_args(follow)
 
@@ -211,6 +229,19 @@ def run(argv: list[str] | None = None) -> int:
                     project_selector=args.project,
                     global_scope=args.global_scope,
                 )
+        elif args.command == "context":
+            result = assistant.response_context(
+                args.query, args.project, current_path=Path.cwd()
+            )
+        elif args.command == "respond":
+            result = assistant.respond(
+                args.query, args.project, current_path=Path.cwd()
+            )
+        elif args.command == "resolve-response-evidence":
+            locator = json.loads(args.locator)
+            if not isinstance(locator, dict):
+                raise AssistantError("response Evidence Locator must be an object")
+            result = assistant.resolve_response_evidence(locator)
         elif args.command == "follow-codex":
             result = assistant.follow_codex_once(
                 args.sessions_root, args.archived_sessions_root

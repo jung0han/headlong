@@ -73,6 +73,17 @@ _build_system_prompt() {
     fi
 }
 
+# Assemble Personal Assistant context through the same deterministic Python
+# boundary used by the public CLI. Callers must provide an explicit Registered
+# Project id; an unscoped chat/wake deliberately receives no project memory.
+_assistant_response_context() {
+    local query="$1" project_id="$2"
+    [[ -n "$query" && -n "$project_id" ]] || return 0
+    command -v headlong-assistant >/dev/null 2>&1 || return 0
+    headlong-assistant --identity "$IDENTITY_NAME" context "$query" \
+        --project "$project_id" 2>/dev/null || true
+}
+
 # ---------------------------------------------------------------------------
 # Goals
 # ---------------------------------------------------------------------------
