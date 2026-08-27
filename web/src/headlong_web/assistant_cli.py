@@ -34,6 +34,9 @@ def build_parser() -> argparse.ArgumentParser:
     observe = commands.add_parser("observe-codex", help="observe eligible Codex Sessions once")
     _source_root_args(observe)
 
+    follow = commands.add_parser("follow-codex", help="collect active Codex records once")
+    _source_root_args(follow)
+
     evidence = commands.add_parser("resolve-evidence", help="resolve a v1 Evidence Locator")
     evidence.add_argument("locator")
     _source_root_args(evidence)
@@ -65,6 +68,10 @@ def run(argv: list[str] | None = None) -> int:
                 result = {"projects": [project.to_dict() for project in assistant.projects()]}
         elif args.command == "observe-codex":
             result = assistant.observe_codex_once(
+                args.sessions_root, args.archived_sessions_root
+            )
+        elif args.command == "follow-codex":
+            result = assistant.follow_codex_once(
                 args.sessions_root, args.archived_sessions_root
             )
         else:
