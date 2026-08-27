@@ -70,8 +70,9 @@ SHELLM_MAX_ITERATIONS="${SHELLM_MAX_ITERATIONS:-}"
 SHELLM_MAX_CONSECUTIVE_FAILURES="${SHELLM_MAX_CONSECUTIVE_FAILURES:-10}"
 SHELLM_MAX_REPEAT_FAILURES="${SHELLM_MAX_REPEAT_FAILURES:-3}"
 SHELLM_TRUNCATE="${SHELLM_TRUNCATE:-2000}"
-SHELLM_API_URL="${SHELLM_API_URL:-}"
-# Clear any inherited LLM_API_URL so llm uses per-provider defaults
+SHELLM_API_URL="${SHELLM_API_URL:-${LLM_API_URL:-}}"
+# SHELLM_API_URL is the shellm-specific override. Otherwise preserve a
+# shared explicit LLM_API_URL so direct and shellm calls use the same route.
 unset LLM_API_URL 2>/dev/null || true
 if [[ -n "$SHELLM_API_URL" ]]; then
     export LLM_API_URL="$SHELLM_API_URL"
@@ -165,6 +166,8 @@ Options:
   --max-iterations N   Max loop iterations (default: unlimited)
   --max-tokens N       Max tokens per response (default: model's max output cap)
   --effort LEVEL       Thinking effort: low, medium, high, xhigh, max (default: high)
+  --model-probe        Call the configured model once and exit without
+                       starting an actor environment
   --workdir DIR        Working directory for generated code (default: a
                        fresh per-run directory under <state-home>/workdirs)
   --here               Shorthand for --workdir "$PWD": work on the project
@@ -190,6 +193,10 @@ Environment:
   <PROVIDER>_API_KEY      Key for SHELLM_MODEL's provider (ANTHROPIC_API_KEY
                           for claude-*, OPENROUTER_API_KEY for vendor/model, ...)
   SHELLM_MODEL            Model to use
+  LLM_PROVIDER            Explicit provider/wire protocol; set openai for an
+                          OpenAI-compatible gateway with arbitrary model ids
+  LLM_API_URL             Shared direct + shellm endpoint override
+  SHELLM_API_URL          Optional shellm-only endpoint override
   SHELLM_FAST_MODEL       Cheap model class for utility calls (summaries,
                           mem search); defaults to SHELLM_MODEL's provider
   SHELLM_MAX_ITERATIONS   Max loop iterations
@@ -1345,6 +1352,16 @@ call_llm() {
     rm -f "$text_file" "$stderr_file"
 }
 
+# Exercise shellm's model/provider/endpoint resolution without asking the
+# model to generate executable code. The actor's model call is host-side;
+# route variables for nested calls are forwarded into actor environments in
+# run_loop below.
+probe_model_route() {
+    llm --no-stream -m "$SHELLM_MODEL" -t 256 \
+        --system-prompt "HeadLong shellm model-route health probe." \
+        "Reply with the single word: ok"
+}
+
 # ---------------------------------------------------------------------------
 # Code extraction from LLM response
 # ---------------------------------------------------------------------------
@@ -2330,6 +2347,11 @@ exit \$__shellm_rc
             SHELLM_ENV="$(if [[ "${_SHELLM_DOCKER_MODE:-0}" -eq 1 && "$SHELLM_ALLOW_NESTED_DOCKER" != "1" ]]; then echo "local"; else echo "${_SHELLM_ACTIVE_ENV:-}"; fi)"
             _SHELLM_PARENT_CONTAINER="${_SHELLM_CONTAINER:-}"
             ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}"
+            OPENAI_API_KEY="${OPENAI_API_KEY:-}"
+            GEMINI_API_KEY="${GEMINI_API_KEY:-}"
+            OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-}"
+            OPENCODE_API_KEY="${OPENCODE_API_KEY:-}"
+            LLM_PROVIDER="${LLM_PROVIDER:-}"
             SHELLM_MODEL="$SHELLM_MODEL"
             SHELLM_MAX_TOKENS="$SHELLM_MAX_TOKENS"
             SHELLM_MAX_ITERATIONS="$SHELLM_MAX_ITERATIONS"
@@ -2706,6 +2728,7 @@ main() {
     local _SHELLM_ENV_NAME="${SHELLM_ENV:-}"
     local _new_env=0
     local _use_traj=""
+    local _model_probe=0
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -2746,6 +2769,10 @@ main() {
             --effort)
                 SHELLM_EFFORT="${2:?--effort requires a value}"
                 shift 2
+                ;;
+            --model-probe)
+                _model_probe=1
+                shift
                 ;;
             --workdir)
                 _SHELLM_WORKDIR_USER="${2:?--workdir requires a value}"
@@ -2841,6 +2868,13 @@ main() {
 
     if [[ "$_new_env" -eq 1 && -n "$_SHELLM_ENV_NAME" ]]; then
         die "--new-env and --env cannot be used together"
+    fi
+
+    if [[ "$_model_probe" -eq 1 ]]; then
+        [[ -z "$prompt" && -z "$_use_traj" && "${#context_files[@]}" -eq 0 ]] \
+            || die "--model-probe cannot be combined with a prompt, trajectory, or context file"
+        probe_model_route
+        exit 0
     fi
 
     validate_docker_config

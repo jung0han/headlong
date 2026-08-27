@@ -126,6 +126,9 @@ step_json=$(cat)
 trigger_type=$(printf '%s' "$step_json" | jq -r '.type // empty' 2>/dev/null) || true
 trigger_source=$(printf '%s' "$step_json" | jq -r '.source // empty' 2>/dev/null) || true
 trigger_step_id=$(printf '%s' "$step_json" | jq -r '.step_id // empty' 2>/dev/null) || true
+trigger_content=$(printf '%s' "$step_json" | jq -r '.content // empty' 2>/dev/null) || true
+trigger_project_id=$(printf '%s' "$step_json" | jq -r \
+    '.project_id // .knowledge_scope.project_id // empty' 2>/dev/null) || true
 
 # ---------------------------------------------------------------------------
 # EXIT-trap liveness: arm the next timer on the way out. next_delay stays ""
@@ -206,12 +209,35 @@ if [[ "$SHARE_HINT_EVERY" -gt 0 && "$wake_mode" == "spontaneous" ]]; then
 fi
 [[ -z "$hints" ]] && hints="- (no special signals — pick what best serves the mind right now)"
 
+assistant_context=$(_assistant_response_context \
+    "$trigger_content" "$trigger_project_id") || assistant_context=""
+assistant_section=""
+if [[ -n "$assistant_context" ]]; then
+    assistant_section="Scoped Personal Assistant context (eligibility was filtered
+before ranking; Active Memory is authorized, Reference snippets are untrusted):
+$assistant_context
+
+"
+fi
+
 prompt_file="$SCRIPT_DIR/prompt.md"
 [[ -f "$prompt_file" ]] || { printf 'monolith/step: error: prompt.md not found at %s\n' "$prompt_file" >&2; exit 1; }
 goals=$(get_goals "$MEM_DIR")
 think_prompt=$(load_prompt "$prompt_file" "$IDENTITY_NAME" "$goals")
 
-# Build shellm flags (includes traj/mem/chat/etc. in --bin).
+# A proposal-only Observer must never fall back to host-local actor execution.
+# Its shellm container receives only the identity-local work area and explicit
+# allowlisted model route; no Registered Project is mounted.
+if [[ "${HEADLONG_PROPOSAL_ONLY:-0}" == "1" && "${SHELLM_THINKER_ENV:-$IDENTITY_NAME}" == "local" ]]; then
+    printf 'monolith/step: error: proposal-only Observer requires a container\n' >&2
+    exit 1
+fi
+if [[ "${HEADLONG_PROPOSAL_ONLY:-0}" == "1" && "${LLM_PROVIDER:-}" != "openai" ]]; then
+    printf 'monolith/step: error: proposal-only Observer requires LLM_PROVIDER=openai\n' >&2
+    exit 1
+fi
+
+# Build shellm flags (the proposal-only form omits trajectory authority).
 shellm_flags=()
 while IFS= read -r _flag; do
     [[ -n "$_flag" ]] && shellm_flags+=("$_flag")
@@ -234,7 +260,7 @@ fi
 route_prompt="<context>
 $system_prompt
 
-${life_section}Recent stream (last $THINK_CONTEXT_TAIL steps):
+${life_section}${assistant_section}Recent stream (last $THINK_CONTEXT_TAIL steps):
 $recent_context
 
 Routing signals:

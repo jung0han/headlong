@@ -195,6 +195,127 @@ export interface IdentityEnv {
   note: string;
 }
 
+export type ProposalReviewState =
+  | "pending"
+  | "accepted"
+  | "rejected"
+  | "dismissed";
+
+export type DirectEvidenceKind =
+  | "user_correction"
+  | "test_failure"
+  | "tool_failure"
+  | "reviewer_finding";
+
+export type ProposalEvidenceKind =
+  | DirectEvidenceKind
+  | "observer_failure"
+  | "observer_regression"
+  | "inferred_pattern";
+
+export interface ProposalEvidenceLocator {
+  schema: "headlong.evidence-locator/v1";
+  kind: "codex_event";
+  source_identity: string;
+  source_root: "active" | "archived";
+  relative_path: string;
+  line: number;
+  byte_offset: number;
+  byte_length: number;
+  sha256: string;
+  host: string;
+}
+
+export interface ImprovementProposal {
+  proposal_id: string;
+  proposal_type: "work" | "observer";
+  proposal_label: "Work Improvement Proposal" | "Observer Improvement Proposal";
+  title: string;
+  content: string;
+  knowledge_scope: { kind: "project"; project_id: string };
+  evidence_kind: ProposalEvidenceKind;
+  evidence_locators: ProposalEvidenceLocator[];
+  source_identity: string | null;
+  source_identities: string[];
+  task_root_ids: string[];
+  source_analysis_event_id: string | null;
+  source_analysis_event_ids: string[];
+  review_state: ProposalReviewState;
+  execution_authority: "none";
+  created_at: string | null;
+  review_event_id: string | null;
+  reviewed_at: string | null;
+}
+
+export interface ShadowGateReport {
+  schema: "headlong.shadow-gate-report/v1";
+  status: "not_started" | "collecting" | "not_ready" | "ready";
+  ready: boolean;
+  shadow_started_at: string | null;
+  evaluated_at: string;
+  elapsed_seconds: number;
+  elapsed_days: number;
+  final_consolidation_count: number;
+  reviewed_observation_count: number;
+  useful_and_accurate_count: number;
+  useful_and_accurate_rate: number | null;
+  incorrect_active_memory_count: number;
+  active_memory_count: number;
+  reviewed_active_memory_count: number;
+  unreviewed_active_memory_count: number;
+  threshold: {
+    duration_days: 7;
+    final_consolidations: 20;
+    rule: "whichever_occurs_first";
+    duration_reached: boolean;
+    final_count_reached: boolean;
+    reached: boolean;
+  };
+  criteria: {
+    minimum_useful_and_accurate_rate: 0.8;
+    quality_met: boolean;
+    requires_zero_incorrect_active_memories: true;
+    requires_all_active_memories_reviewed: true;
+    memory_safety_met: boolean;
+  };
+  authority: {
+    mode: "proposal_only";
+    external_writes_enabled: false;
+    hook_adapters_enabled: false;
+    project_mounts_enabled: false;
+  };
+}
+
+export interface ShadowGateObservation {
+  event_id: string;
+  title: string;
+  content: string;
+  source_identity: string;
+  knowledge_scope: { kind: "project"; project_id: string };
+  evidence_locators: ProposalEvidenceLocator[];
+  observed_at: string | null;
+  evaluation: {
+    event_id: string;
+    useful: boolean;
+    accurate: boolean;
+    reviewed_at: string | null;
+  } | null;
+}
+
+export interface ShadowGateMemory {
+  event_id: string;
+  memory_key: string;
+  memory_kind: "decision" | "preference" | "constraint";
+  content: string;
+  knowledge_scope: { kind: "project"; project_id: string } | { kind: "global" };
+  activated_at: string | null;
+  evaluation: {
+    event_id: string;
+    correct: boolean;
+    reviewed_at: string | null;
+  } | null;
+}
+
 export interface KillallResult {
   ok: boolean;
   dry_run: boolean;

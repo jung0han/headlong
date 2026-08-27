@@ -1,0 +1,10 @@
+# Start and stop one proposal-only Personal Assistant as an operational group.
+
+[Unit]
+Description=headlong Personal Assistant for Observer Identity %i
+Requires=headlong-thinkers@%i.service
+Wants=headlong-assistant-codex@%i.service headlong-assistant-web@%i.service
+After=headlong-thinkers@%i.service
+
+[Install]
+WantedBy=multi-user.target

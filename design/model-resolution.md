@@ -12,11 +12,11 @@ environment variables that feed that decision come from. Two layers:
 2. **Population** — the env vars themselves are filled in from `.env`
    files, with different (deliberate) merge semantics per tool.
 
-There is no hard provider dependency anywhere: `bin/llm` picks the
-provider from the model name (`claude-*` → Anthropic, `vendor/model` →
-OpenRouter, `gpt-*`/`o*` → OpenAI, `gemini-*` → Gemini) and each provider
-needs only its own `<PROVIDER>_API_KEY`. Hardcoded `claude-*` names below
-are last-resort defaults, reached only when nothing is configured.
+By default `bin/llm` picks the provider from the model name (`claude-*` →
+Anthropic, `vendor/model` → OpenRouter, `gpt-*`/`o*` → OpenAI, `gemini-*` →
+Gemini). An explicit `LLM_PROVIDER` overrides that inference. This is required
+for arbitrary model identifiers served by an OpenAI-compatible gateway such as
+LiteLLM: the model catalog name does not have to resemble an OpenAI model.
 
 ## The knobs
 
@@ -27,6 +27,9 @@ are last-resort defaults, reached only when nothing is configured.
 | `THINK_MODEL` | Per-thinker override (also settable per identity via `info.txt think_model=`) |
 | `SHELLM_SUMMARY_MODEL` | Run-summary override; beats `SHELLM_FAST_MODEL` |
 | `LLM_MODEL` | `bin/llm`'s own knob; equivalent to `-m` |
+| `LLM_PROVIDER` | Explicit provider/wire protocol; use `openai` for an OpenAI-compatible LiteLLM route |
+| `LLM_API_URL` | Shared explicit endpoint used by direct calls and, unless overridden, shellm |
+| `SHELLM_API_URL` | Optional shellm-only endpoint override |
 
 ## Resolution chains
 
@@ -80,6 +83,13 @@ Consequences worth knowing:
 - Model selection should still travel via flags (`--model`, `-m`) rather
   than inline env when scripting: a flag beats every layer above and is
   immune to future loader changes.
+- `shellm` preserves an inherited `LLM_API_URL`; `SHELLM_API_URL` wins when
+  both are set. Explicit provider, endpoint, model, and credential variables
+  are forwarded by name into generated or containerized execution so a nested
+  shellm call stays on the same route without putting credentials on argv.
+- `headlong-model-probe` tests both the direct and shellm paths. The installer
+  and systemd thinker start refuse to enter the persistent loop when it fails;
+  the metadata-only result is written to `run/model_route_health.json`.
 
 ## Choosing values (cost)
 
@@ -101,4 +111,10 @@ SHELLM_MODEL=openai/gpt-oss-120b
 # Mixed quality: smart actor, cheap utilities
 SHELLM_MODEL=z-ai/glm-5.2
 SHELLM_FAST_MODEL=openai/gpt-oss-120b
+
+# Arbitrary DeepSeek catalog id through an OpenAI-compatible LiteLLM service
+LLM_PROVIDER=openai
+LLM_API_URL=http://litellm.example.test/v1/chat/completions
+OPENAI_API_KEY=use-a-dedicated-key
+SHELLM_MODEL=deepseek-flash-v4
 ```

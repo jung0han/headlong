@@ -86,8 +86,22 @@ die() { echo "llm: error: $*" >&2; exit 1; }
 #   {"ok":true,"ts":...,"provider":...,"model":...}
 #   {"ok":false,"ts":...,"kind":"credit|auth|rate|other","http_code":402,"message":...,...}
 _llm_health_file="$_llm_home/run/llm_health.json"
+
+# Providers occasionally echo request details in an error. Never persist a
+# configured credential in the health marker that status commands and the dash
+# expose. Replacement is literal and covers every credential this CLI knows.
+_llm_redact_credentials() {
+    local out="$1" name value
+    for name in ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY OPENROUTER_API_KEY OPENCODE_API_KEY; do
+        value="${!name:-}"
+        [[ -n "$value" ]] && out="${out//"$value"/<redacted>}"
+    done
+    printf '%s' "$out"
+}
+
 _llm_note() {   # _llm_note ok|error [http_code] [message]
     local st="$1" code="${2:-}" msg="${3:-}" kind="" m tmp
+    msg=$(_llm_redact_credentials "$msg")
     mkdir -p "$_llm_home/run" 2>/dev/null || return 0
     if [[ "$st" == error ]]; then
         m=$(printf '%s' "$msg" | tr '[:upper:]' '[:lower:]')
@@ -926,6 +940,7 @@ stream_opencode() { stream_anthropic; }
 # long" on a large one (Linux caps a single argument at 128 KiB, macOS caps
 # total argv at 1 MiB). The file is reused across retries and removed on exit.
 payload_file=$(mktemp "${TMPDIR:-/tmp}/llm-payload.XXXXXX")
+header_config=""
 # No caller-provided usage file: a private one stands in (the ledger still
 # gets the record) and goes away with the payload file.
 _llm_usage_own=0
@@ -935,6 +950,7 @@ if [[ -z "$LLM_USAGE_FILE" ]]; then
 fi
 _llm_cleanup() {
     rm -f "$payload_file"
+    [[ -n "$header_config" ]] && rm -f "$header_config"
     if [[ "$_llm_usage_own" -eq 1 ]]; then rm -f "$LLM_USAGE_FILE"; fi
     return 0
 }
@@ -945,6 +961,19 @@ trap '_llm_cleanup' EXIT
 url=""
 headers=()
 get_url_headers
+
+# curl exposes literal -H values in its process argv. Put every header in a
+# mode-0600 config file instead, so provider credentials are available to curl
+# without appearing in ps, systemctl status, or /proc/<pid>/cmdline.
+header_config=$(mktemp "${TMPDIR:-/tmp}/llm-headers.XXXXXX")
+chmod 600 "$header_config"
+for ((header_i = 1; header_i < ${#headers[@]}; header_i += 2)); do
+    header_value="${headers[$header_i]}"
+    header_value="${header_value//\\/\\\\}"
+    header_value="${header_value//\"/\\\"}"
+    printf 'header = "%s"\n' "$header_value" >> "$header_config"
+done
+headers=(--config "$header_config")
 
 [[ "$LLM_RETRIES" =~ ^[0-9]+$ ]] || LLM_RETRIES=0
 _max_attempts=$(( LLM_RETRIES + 1 ))

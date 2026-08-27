@@ -22,7 +22,7 @@ IDENT="${2:?identity name required}"
 ACTION="${3:?action required (start|stop)}"
 
 cd "$APP_DIR"
-export PATH="$APP_DIR/bin:$PATH"
+export PATH="$APP_DIR/bin:$APP_DIR/tools:$PATH"
 
 # Same env layering as the web control plane's _ENV_WRAPPER: root .env
 # first (API keys, SHELLM_MODEL), then the identity's own .env so
@@ -57,6 +57,12 @@ set -o pipefail
 
 case "$ACTION" in
     start)
+        # Refuse to enter the persistent loop on a stale key, wrong provider,
+        # or endpoint mismatch. This probes both direct and shellm call paths
+        # and writes a credential-free health result before the dispatcher is
+        # forked.
+        "$APP_DIR/tools/headlong-model-probe"
+
         # Always stop first so the dispatcher runs with the environment THIS
         # invocation sourced (see bootstrap-slack-identity.sh for the
         # stale-env incident that made this unconditional). --self: service

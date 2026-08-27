@@ -73,6 +73,17 @@ _build_system_prompt() {
     fi
 }
 
+# Assemble Personal Assistant context through the same deterministic Python
+# boundary used by the public CLI. Callers must provide an explicit Registered
+# Project id; an unscoped chat/wake deliberately receives no project memory.
+_assistant_response_context() {
+    local query="$1" project_id="$2"
+    [[ -n "$query" && -n "$project_id" ]] || return 0
+    command -v headlong-assistant >/dev/null 2>&1 || return 0
+    headlong-assistant --identity "$IDENTITY_NAME" context "$query" \
+        --project "$project_id" 2>/dev/null || true
+}
+
 # ---------------------------------------------------------------------------
 # Goals
 # ---------------------------------------------------------------------------
@@ -329,8 +340,10 @@ _build_shellm_flags() {
     printf '%s\n' "--var" "MEM_DIR=$abs_mem_dir"
     printf '%s\n' "--var" "SKILLS_DIR=$abs_skills_dir"
     printf '%s\n' "--var" "SKILLS_KERNEL_DIR=$abs_kernel_dir"
-    printf '%s\n' "--var" "TRAJ_DIR=$abs_traj_dir"
-    printf '%s\n' "--var" "TRAJ_ID=$TRAJ_ID"
+    if [[ "${HEADLONG_PROPOSAL_ONLY:-0}" != "1" ]]; then
+        printf '%s\n' "--var" "TRAJ_DIR=$abs_traj_dir"
+        printf '%s\n' "--var" "TRAJ_ID=$TRAJ_ID"
+    fi
 
     # Propagate model + API keys to nested shellm calls. Inside Docker, .env
     # isn't mounted, so without these the nested call hits the final else in
@@ -338,23 +351,57 @@ _build_shellm_flags() {
     # Keys go by NAME (bare `--var NAME`): shellm reads the value from its
     # environment, so it never shows up in `ps` or the recorded command line.
     [[ -n "${SHELLM_MODEL:-}" ]] && printf '%s\n' "--var" "SHELLM_MODEL=$SHELLM_MODEL"
-    for _ak in ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY OPENROUTER_API_KEY; do
-        if [[ -n "${!_ak:-}" ]]; then
-            export "${_ak?}"
-            printf '%s\n' "--var" "$_ak"
+    [[ -n "${LLM_PROVIDER:-}" ]] && printf '%s\n' "--var" "LLM_PROVIDER=$LLM_PROVIDER"
+    # Endpoint values may identify a private service. Forward them by name so
+    # neither process arguments nor shellm-run trajectory rows copy the value.
+    for _route_var in SHELLM_API_URL LLM_API_URL; do
+        if [[ -n "${!_route_var:-}" ]]; then
+            export "${_route_var?}"
+            printf '%s\n' "--var" "$_route_var"
         fi
     done
+    # A private OpenAI-compatible route may use a pinned CA. The certificate
+    # itself lives inside the already-mounted Observer Identity; forward only
+    # its path so curl/OpenSSL in the container use the same trust decision as
+    # the host-side route probe. These variables contain no credential value.
+    for _tls_var in SSL_CERT_FILE CURL_CA_BUNDLE; do
+        if [[ -n "${!_tls_var:-}" ]]; then
+            export "${_tls_var?}"
+            printf '%s\n' "--var" "$_tls_var"
+        fi
+    done
+    if [[ "${HEADLONG_PROPOSAL_ONLY:-0}" == "1" ]]; then
+        [[ "${LLM_PROVIDER:-}" == "openai" ]] \
+            || { printf 'proposal-only Observer requires LLM_PROVIDER=openai\n' >&2; return 1; }
+        if [[ -n "${OPENAI_API_KEY:-}" ]]; then
+            export OPENAI_API_KEY
+            printf '%s\n' "--var" "OPENAI_API_KEY"
+        fi
+    else
+        for _ak in ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY OPENROUTER_API_KEY OPENCODE_API_KEY; do
+            if [[ -n "${!_ak:-}" ]]; then
+                export "${_ak?}"
+                printf '%s\n' "--var" "$_ak"
+            fi
+        done
+    fi
 
-    # Skill-declared vars
-    while IFS= read -r vname; do
-        [[ -z "$vname" ]] && continue
-        local vval="${!vname:-}"
-        [[ -n "$vval" ]] && printf '%s\n' "--var" "$vname=$vval"
-    done < <(collect_skill_vars "$identity_dir")
+    # Skill credentials belong to ordinary identities, not the proposal-only
+    # Observer. Its only forwarded secret is the selected LiteLLM route key.
+    if [[ "${HEADLONG_PROPOSAL_ONLY:-0}" != "1" ]]; then
+        while IFS= read -r vname; do
+            [[ -z "$vname" ]] && continue
+            local vval="${!vname:-}"
+            [[ -n "$vval" ]] && printf '%s\n' "--var" "$vname=$vval"
+        done < <(collect_skill_vars "$identity_dir")
+    fi
 
     # Standard binaries
     local cmd
     for cmd in mem traj skills context llm shellm chat glob view put sub; do
+        if [[ "$cmd" == "traj" && "${HEADLONG_PROPOSAL_ONLY:-0}" == "1" ]]; then
+            continue
+        fi
         local path
         path=$(command -v "$cmd" 2>/dev/null) || continue
         printf '%s\n' "--bin" "$path"

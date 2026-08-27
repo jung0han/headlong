@@ -20,7 +20,7 @@ cmd_for() {        # cmd_for <identity> — how to address it from THIS shell
     else printf '%spersona %s' "$BIN" "$1"; fi
 }
 TOOLS=(shellm shellm-docker skills mem llm context traj thinkers chat focus recap glob view put sub
-       shellm-docker-broker identity shellm-explore headlong-init headlong-killall persona headlong-web
+       shellm-docker-broker identity shellm-explore headlong-init headlong-killall persona headlong-web headlong-assistant
        headlong-slack-bridge headlong-telegram-bridge headlong-tui)
 # Process shapes, same as headlong-killall (the source of truth) and
 # uninstall.sh; tests/test_uninstall.sh checks the three agree.
@@ -30,6 +30,7 @@ PATTERNS=(
     'bash [^ ]*/thinkers/[^ /]+/step( |$)'
     'bash [^ ]*/bin/traj tail'
     'tail -n 0 -F [^ ]*trajectory\.jsonl'
+    '(uv run --project [^ ]+ |/\.venv/bin/)headlong-assistant .*run-(codex|web)-bridge( |$)'
 )
 DASH_PAT='(uv run --project [^ ]+ |/\.venv/bin/)(headlong|shellm|shelly)-web( |$)'
 

@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Resolve through symlinks, then fall back to the checkout recorded by install.
+ROOT_DIR="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/.." && pwd)"
+if [[ ! -d "$ROOT_DIR/web" ]]; then
+    _home="${HEADLONG_HOME:-${SHELLM_HOME:-$HOME/.headlong}}"
+    _recorded=$(cat "$_home/app_dir" 2>/dev/null || true)
+    if [[ -n "$_recorded" && -d "$_recorded/web" ]]; then ROOT_DIR="$_recorded"
+    elif [[ -d "$_home/app/web" ]]; then ROOT_DIR="$_home/app"
+    else echo "headlong-assistant: can't find the HeadLong checkout" >&2; exit 1
+    fi
+fi
+command -v uv >/dev/null 2>&1 || { echo "headlong-assistant: uv is required" >&2; exit 1; }
+exec uv run --project "$ROOT_DIR/web" headlong-assistant --root "$ROOT_DIR" "$@"

@@ -106,6 +106,55 @@ terraform deploy writes this drop-in automatically.)
 | Update to latest code | see below; or click the navbar build stamp → "Pull latest & restart" (needs `HEADLONG_WEB_SELF_UPDATE=1` in the unit, which the shipped unit sets) |
 | View-only mode | add `Environment="HEADLONG_WEB_READONLY=1"` to the override.conf drop-in (see §4) |
 
+### Run a Personal Assistant continuously
+
+Create or import the Observer Identity first, then enable its operational
+target. The target groups the existing thinker unit with independently
+restartable Codex and Web source bridges:
+
+```bash
+sudo systemctl enable --now headlong-assistant@observer.target
+systemctl status headlong-thinkers@observer \
+  headlong-assistant-codex@observer headlong-assistant-web@observer
+```
+
+Host-only source paths and cycle intervals belong in
+`/etc/headlong/assistant.env` (the units read it when present):
+
+```bash
+CODEX_HOME=/home/operator/.codex
+HEADLONG_CODEX_BRIDGE_INTERVAL_SECONDS=10
+HEADLONG_WEB_BRIDGE_INTERVAL_SECONDS=900
+HEADLONG_ASSISTANT_STORAGE_LIMIT_BYTES=1000000000
+```
+
+The root app `.env`, Observer `.env`, and identity `activate` file are then
+loaded with the same precedence as `headlong-thinkers@`. Both bridges run the
+direct-and-shellm model probe before persistent work begins. Cursor, projection,
+and Reference state lives under the identity rather than `/run`, so a service
+restart reuses it.
+
+`GET /api/identities/.identities~observer/assistant/health` (or
+`headlong-assistant --identity observer status`) reports only allowlisted model
+route metadata, cursor offsets and digests, last success, compact error codes,
+and storage-limit state. It does not return source paths, credentials, raw
+session events, request errors, or Reference bodies.
+
+Stop or restart the whole group with the target, or operate one bridge without
+disturbing the mind or the other bridge:
+
+```bash
+sudo systemctl stop headlong-assistant@observer.target
+sudo systemctl restart headlong-assistant-codex@observer
+```
+
+To remove only this supervision while preserving the Observer and normal
+HeadLong services:
+
+```bash
+sudo bash /opt/shellm/app/deploy/uninstall-assistant-services.sh
+```
+
 **Updating:**
 
 ```bash

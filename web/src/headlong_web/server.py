@@ -12,6 +12,7 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
@@ -23,6 +24,8 @@ from starlette.background import BackgroundTask
 
 from headlong_web import (
     activity,
+    assistant,
+    assistant_runtime,
     chat,
     control,
     discovery,
@@ -163,6 +166,34 @@ class KillallBody(BaseModel):
 class EnvVarBody(BaseModel):
     key: str
     value: str
+
+
+class ProposalReviewBody(BaseModel):
+    state: Literal["pending", "accepted", "rejected", "dismissed"]
+
+
+class ObservationEvaluationBody(BaseModel):
+    useful: bool
+    accurate: bool
+
+    model_config = {"extra": "forbid"}
+
+
+class ActiveMemoryEvaluationBody(BaseModel):
+    correct: bool
+
+    model_config = {"extra": "forbid"}
+
+
+class ActiveMemoryBody(BaseModel):
+    content: str | None = None
+    candidate_event_id: str | None = None
+    memory_kind: str
+    memory_key: str
+    project_id: str | None = None
+    global_scope: bool = False
+
+    model_config = {"extra": "forbid"}
 
 
 def create_app(
@@ -341,7 +372,14 @@ def create_app(
                 if traj_dir is not None
                 else None
             ),
+            "assistant": assistant_runtime.public_health(root, identity),
         }
+
+    @app.get("/api/identities/{identity_id}/assistant/health")
+    def identity_assistant_health(identity_id: str) -> dict:
+        """Bounded operational status; source bodies and secrets are excluded."""
+        identity = _identity_or_404(root, identity_id)
+        return assistant_runtime.public_health(root, identity)
 
     @app.get("/api/identities/{identity_id}/mindlog")
     def mindlog(
@@ -547,6 +585,217 @@ def create_app(
         if not memory_path.is_file():
             raise HTTPException(status_code=404, detail="Memory not found")
         return {"name": name, "content": memory_path.read_text(encoding="utf-8", errors="replace")}
+
+    @app.get("/api/identities/{identity_id}/active-memories")
+    def identity_active_memories(
+        identity_id: str,
+        project_id: str | None = None,
+        include_global: bool = True,
+        global_only: bool = False,
+    ) -> list[dict]:
+        identity = _identity_or_404(root, identity_id)
+        try:
+            return assistant.PersonalAssistant(root, identity).active_memories(
+                project_id,
+                include_global=include_global,
+                global_only=global_only,
+            )
+        except assistant.AssistantError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/identities/{identity_id}/memory-candidates")
+    def identity_memory_candidates(
+        identity_id: str,
+        project_id: str | None = None,
+        include_global: bool = True,
+        global_only: bool = False,
+    ) -> list[dict]:
+        identity = _identity_or_404(root, identity_id)
+        try:
+            return assistant.PersonalAssistant(root, identity).memory_candidates(
+                project_id,
+                include_global=include_global,
+                global_only=global_only,
+            )
+        except assistant.AssistantError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/identities/{identity_id}/active-memories")
+    def identity_activate_memory(identity_id: str, body: ActiveMemoryBody) -> dict:
+        _require_controls()
+        identity = _identity_or_404(root, identity_id)
+        service = assistant.PersonalAssistant(root, identity)
+        try:
+            if (body.content is None) == (body.candidate_event_id is None):
+                raise assistant.AssistantError(
+                    "provide exactly one of content or candidate_event_id"
+                )
+            if not body.global_scope and body.project_id is None:
+                raise assistant.AssistantError(
+                    "dashboard activation requires project_id or explicit global_scope"
+                )
+            if body.candidate_event_id is not None:
+                return service.accept_memory_candidate(
+                    body.candidate_event_id,
+                    memory_kind=body.memory_kind,
+                    memory_key=body.memory_key,
+                    project_selector=body.project_id,
+                    global_scope=body.global_scope,
+                )
+            return service.remember_memory(
+                body.content or "",
+                memory_kind=body.memory_kind,
+                memory_key=body.memory_key,
+                project_selector=body.project_id,
+                global_scope=body.global_scope,
+            )
+        except assistant.AssistantError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/identities/{identity_id}/active-memories/rebuild")
+    def identity_rebuild_active_memories(identity_id: str) -> dict:
+        _require_controls()
+        identity = _identity_or_404(root, identity_id)
+        try:
+            return assistant.PersonalAssistant(root, identity).rebuild_active_memory()
+        except assistant.AssistantError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.get("/api/identities/{identity_id}/references")
+    def identity_references(identity_id: str) -> list[dict]:
+        identity = _identity_or_404(root, identity_id)
+        try:
+            return assistant.PersonalAssistant(root, identity).references()
+        except assistant.AssistantError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.get("/api/identities/{identity_id}/proposals")
+    def identity_proposals(identity_id: str) -> list[dict]:
+        identity = _identity_or_404(root, identity_id)
+        try:
+            return assistant.PersonalAssistant(root, identity).proposals()
+        except assistant.AssistantError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.get("/api/identities/{identity_id}/proposals/{proposal_id}")
+    def identity_proposal(identity_id: str, proposal_id: str) -> dict:
+        identity = _identity_or_404(root, identity_id)
+        try:
+            result = assistant.PersonalAssistant(root, identity).proposal(proposal_id)
+        except assistant.AssistantError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if result is None:
+            raise HTTPException(status_code=404, detail="Proposal not found")
+        return result
+
+    @app.post("/api/identities/{identity_id}/proposals/{proposal_id}/review")
+    def identity_proposal_review(
+        identity_id: str, proposal_id: str, body: ProposalReviewBody
+    ) -> dict:
+        _require_controls()
+        identity = _identity_or_404(root, identity_id)
+        try:
+            return assistant.PersonalAssistant(root, identity).review_proposal(
+                proposal_id, body.state
+            )
+        except assistant.AssistantError as exc:
+            status = 404 if "not found" in str(exc) else 422
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+    @app.get("/api/identities/{identity_id}/assistant/shadow-gate")
+    def identity_shadow_gate(identity_id: str) -> dict:
+        identity = _identity_or_404(root, identity_id)
+        try:
+            return assistant.PersonalAssistant(root, identity).shadow_gate_report()
+        except assistant.AssistantError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.get("/api/identities/{identity_id}/assistant/shadow-gate/observations")
+    def identity_shadow_gate_observations(identity_id: str) -> list[dict]:
+        identity = _identity_or_404(root, identity_id)
+        try:
+            return assistant.PersonalAssistant(root, identity).shadow_gate_observations()
+        except assistant.AssistantError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/identities/{identity_id}/assistant/shadow-gate/observations/"
+        "{observation_event_id}/review"
+    )
+    def identity_shadow_gate_observation_review(
+        identity_id: str,
+        observation_event_id: str,
+        body: ObservationEvaluationBody,
+    ) -> dict:
+        _require_controls()
+        identity = _identity_or_404(root, identity_id)
+        try:
+            return assistant.PersonalAssistant(root, identity).review_observation(
+                observation_event_id, useful=body.useful, accurate=body.accurate
+            )
+        except assistant.AssistantError as exc:
+            status = 404 if "not found" in str(exc) else 422
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+    @app.get("/api/identities/{identity_id}/assistant/shadow-gate/active-memories")
+    def identity_shadow_gate_memories(identity_id: str) -> list[dict]:
+        identity = _identity_or_404(root, identity_id)
+        try:
+            return assistant.PersonalAssistant(root, identity).shadow_gate_memories()
+        except assistant.AssistantError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/identities/{identity_id}/assistant/shadow-gate/active-memories/"
+        "{memory_event_id}/review"
+    )
+    def identity_shadow_gate_memory_review(
+        identity_id: str,
+        memory_event_id: str,
+        body: ActiveMemoryEvaluationBody,
+    ) -> dict:
+        _require_controls()
+        identity = _identity_or_404(root, identity_id)
+        try:
+            return assistant.PersonalAssistant(root, identity).review_active_memory(
+                memory_event_id, correct=body.correct
+            )
+        except assistant.AssistantError as exc:
+            status = 404 if "not found" in str(exc) else 422
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+    @app.get("/api/identities/{identity_id}/web-sources/health")
+    def identity_web_source_health(identity_id: str) -> list[dict]:
+        identity = _identity_or_404(root, identity_id)
+        try:
+            return assistant.PersonalAssistant(root, identity).web_source_health()
+        except assistant.AssistantError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/identities/{identity_id}/references/{source_id}/{revision_id}"
+    )
+    def identity_reference(
+        identity_id: str, source_id: str, revision_id: str
+    ) -> dict:
+        identity = _identity_or_404(root, identity_id)
+        safety.checked_name(source_id, safety.REFERENCE_SOURCE_ID_RE)
+        safety.checked_name(revision_id, safety.REFERENCE_REVISION_ID_RE)
+        base = identity.path / "assistant" / "references"
+        revision_dir = safety.contained_path(base, source_id, revision_id)
+        # Resolve both levels through the public path guard before the store
+        # reader opens its fixed metadata/content filenames.
+        safety.contained_path(revision_dir, "metadata.json")
+        safety.contained_path(revision_dir, "content.txt")
+        try:
+            result = assistant.PersonalAssistant(root, identity).reference(
+                source_id, revision_id
+            )
+        except assistant.AssistantError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        if result is None:
+            raise HTTPException(status_code=404, detail="Reference not found")
+        return result
 
     @app.get("/api/identities/{identity_id}/recap")
     def identity_recap(identity_id: str) -> dict:

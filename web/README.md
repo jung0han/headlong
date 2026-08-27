@@ -74,6 +74,10 @@ still honored.
   cards with frontmatter summaries and dates, plus the full Markdown reader.
 - **Health** (`/i/<identity>/health`) — reply latency, stalls, and LLM
   provider health inferred from the mind log.
+- **Shadow gate** (`/i/<identity>/shadow`) — elapsed evaluation time, Final
+  Consolidation and review counts, useful-and-accurate rate, incorrect Active
+  Memory count, and append-only human review controls. A ready report remains
+  proposal-only and enables no external writes, hooks, or project mounts.
 - **Config** (`/i/<identity>/config`) — the identity's `.env` (model,
   effort, keys redacted) with an OpenRouter model picker.
 

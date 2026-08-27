@@ -9,6 +9,12 @@ trades away).
 
 Read this before designing the change, not after.
 
+Adding the opt-in `headlong-assistant@<identity>.target` and its source bridge
+units does not rename or replace an existing unit. Routine `update.sh` installs
+the templates and restarts only already-running bridge instances; it does not
+start a new Observer or restart `headlong-thinkers@`. Enable the target
+explicitly after the Observer Identity and host source configuration exist.
+
 ## The one principle
 
 **Make the code accept both the old and the new name, then flip the world

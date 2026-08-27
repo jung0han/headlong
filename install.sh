@@ -36,7 +36,7 @@ SYMLINKS="${SYMLINKS:-0}"
 RUN_INIT=0
 # Core agent tools (bin/) and the management/aux CLIs around them (tools/).
 BIN_TOOLS=(shellm shellm-docker skills mem llm context traj thinkers chat focus recap glob view put sub)
-AUX_TOOLS=(shellm-docker-broker identity shellm-explore headlong-init headlong-killall persona headlong-web headlong-slack-bridge headlong-telegram-bridge)
+AUX_TOOLS=(shellm-docker-broker identity shellm-explore headlong-init headlong-model-probe headlong-killall persona headlong-web headlong-assistant headlong-slack-bridge headlong-telegram-bridge)
 TOOLS=("${BIN_TOOLS[@]}" "${AUX_TOOLS[@]}")
 
 # ---------------------------------------------------------------------------
@@ -159,10 +159,13 @@ EOF
     local -a fwd=()
     local var
     for var in ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY OPENROUTER_API_KEY \
-               OPENCODE_API_KEY \
+               OPENCODE_API_KEY SHELLM_MODEL LLM_PROVIDER LLM_API_URL SHELLM_API_URL \
                HEADLONG_IDENTITY_NAME HEADLONG_IDENTITY_VIBE HEADLONG_IDENTITY_FOCUS \
                HEADLONG_IDENTITY_USER HEADLONG_OPERATOR_NAME HEADLONG_REPO HEADLONG_BRANCH; do
-        if [[ -n "${!var:-}" ]]; then fwd+=(-e "$var=${!var}"); fi
+        # Name-only docker env forwarding keeps credential and private endpoint
+        # values off the docker command line while preserving them in the
+        # child container environment.
+        if [[ -n "${!var:-}" ]]; then fwd+=(-e "$var"); fi
     done
 
     echo
