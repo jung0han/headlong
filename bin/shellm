@@ -1693,113 +1693,11 @@ SYSPROMPT
     fi
 }
 
-# ---------------------------------------------------------------------------
-# Async context summary generation
-# ---------------------------------------------------------------------------
-
 generate_run_summary() {
-    local traj_dir="$1"
-    local traj_id="$2"
-    local run_step_id="$3"  # step_id of the shellm-run step this summarizes
-    local prompt="$4"
-    local stdin_file="$5"  # path to file with stdin content, or ""
-    shift 5
-    local file_paths=("$@")
-
-    # Summaries want a cheap model. Resolution: explicit SHELLM_SUMMARY_MODEL,
-    # then the fast class (SHELLM_FAST_MODEL), then haiku when the run is on
-    # Anthropic, else stay on the run's own provider (a claude-* fallback
-    # would need an ANTHROPIC_API_KEY non-Anthropic deployments don't have).
-    local summary_model="${SHELLM_SUMMARY_MODEL:-${SHELLM_FAST_MODEL:-}}"
-    if [[ -z "$summary_model" ]]; then
-        case "$SHELLM_MODEL" in
-            claude-*) summary_model="claude-haiku-4-5-20251001" ;;
-            *)        summary_model="$SHELLM_MODEL" ;;
-        esac
-    fi
-
-    # Read stdin content if available
-    local stdin_content=""
-    if [[ -n "$stdin_file" && -f "$stdin_file" ]]; then
-        stdin_content=$(cat "$stdin_file")
-    fi
-
-    # Build combined context for LLM (cap at 20K chars)
-    local max_ctx=20000
-    local combined="CLI argument: ${prompt:0:$max_ctx}"
-
-    if [[ -n "$stdin_content" ]]; then
-        local avail=$((max_ctx - ${#combined}))
-        if [[ $avail -gt 0 ]]; then
-            combined+=$'\n\nstdin:\n'"${stdin_content:0:$avail}"
-        fi
-    fi
-
-    for f in "${file_paths[@]+"${file_paths[@]}"}"; do
-        if [[ -f "$f" ]]; then
-            local avail=$((max_ctx - ${#combined}))
-            [[ $avail -le 0 ]] && break
-            local fc
-            fc=$(head -c "$avail" "$f" 2>/dev/null || true)
-            combined+=$'\n\nFile '"${f}"$':\n'"${fc}"
-        fi
-    done
-
-    local total_size=${#combined}
-
-    # Determine full_summary instruction
-    local full_summary_hint
-    if [[ $total_size -gt 1000 ]]; then
-        full_summary_hint='"<multi-paragraph summary string>"'
-    else
-        full_summary_hint='null'
-    fi
-
-    # Build LLM prompt — ask for JSON so we can parse reliably
-    local llm_prompt="Analyze the context and goal of this shellm run. Respond with ONLY valid JSON (no markdown fences, no preamble) matching this schema:
-{
-  \"tldr\": \"one-line summary of the context and goal of this shellm run\",
-  \"full_summary\": ${full_summary_hint}
-}
-
-Inputs to the run:
-${combined}"
-
-    # Non-streaming API call to fast model
-    local msg_json
-    local _prompt_tmp
-    _prompt_tmp=$(mktemp)
-    printf '%s' "$llm_prompt" > "$_prompt_tmp"
-    msg_json=$(jq -n --rawfile p "$_prompt_tmp" '[{"role":"user","content":$p}]')
-    rm -f "$_prompt_tmp"
-
-    local text
-    text=$(llm -m "$summary_model" -t 2048 \
-        -s "You produce concise summaries as JSON. Output only valid JSON. No markdown fences. No preamble." \
-        -M "$msg_json" 2>/dev/null) || true
-
-    # Parse JSON response
-    local tldr="" full_summary=""
-    if [[ -n "$text" ]]; then
-        # Strip markdown fences if the model wrapped them anyway
-        local cleaned
-        cleaned=$(printf '%s\n' "$text" | sed '1s/^```json$//;1s/^```$//;$s/^```$//' | sed '/^$/d')
-        if printf '%s' "$cleaned" | jq . >/dev/null 2>&1; then
-            text="$cleaned"
-            tldr=$(printf '%s' "$text" | jq -r '.tldr // empty')
-            full_summary=$(printf '%s' "$text" | jq -r 'if .full_summary == null then "" else .full_summary end')
-        fi
-    fi
-
-    # Write run-summary step to the trajectory
-    local summary_json
-    summary_json=$(jq -nc \
-        --arg tldr "${tldr:-(summary generation failed)}" \
-        --arg full "$full_summary" \
-        --arg run_id "$run_step_id" \
-        --arg model "$summary_model" \
-        '{type:"run-summary", tldr:$tldr, full_summary:$full, run_id:$run_id, model:$model}')
-    printf '%s' "$summary_json" | traj append --traj_dir "$traj_dir" "$traj_id" >/dev/null 2>/dev/null || true
+    # shellcheck disable=SC2155
+    local tool="$(cd "$(dirname "$_SHELLM_SCRIPT_PATH")/.." && pwd)/tools/headlong-run-summary"
+    [[ -x "$tool" ]] || tool=$(command -v headlong-run-summary || true); [[ -n "$tool" && -x "$tool" ]] || { echo "shellm: run summary helper is not installed" >&2; return 0; }
+    "$tool" "$@"
 }
 
 # Stream lines past $2 from $1 to stderr (redacted), then print the new

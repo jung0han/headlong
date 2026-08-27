@@ -34,6 +34,7 @@ mkdir -p "$WORK/bin"
 cat > "$WORK/bin/llm" <<'EOF'
 #!/usr/bin/env bash
 input=$(cat)
+printf '%s\n' "$*" >> "$LLM_ARG_LOG"
 printf 'CALL\n%s\n---\n' "$input" >> "$LLM_LOG"
 n=$(printf '%s' "$input" | wc -l | tr -d ' ')
 printf '{"summary":"rollup of %s lines","themes":["testing"],"step_ids":["st000001"]}' "$n"
@@ -41,6 +42,7 @@ EOF
 chmod +x "$WORK/bin/llm"
 export PATH="$WORK/bin:$REPO/bin:$PATH"
 export LLM_LOG="$WORK/llm.log"
+export LLM_ARG_LOG="$WORK/llm-args.log"
 unset TRAJ_DIR TRAJ_ID RECAP_MODEL SHELLM_FAST_MODEL SHELLM_MODEL 2>/dev/null || true
 
 TRAJ_ROOT="$WORK/trajectories"
@@ -94,6 +96,7 @@ sed 's/thinking about topic 3/& CACHE-SENTINEL/' "$TSV" > "$TSV.sed" && mv "$TSV
 add_steps "$RUN" 26 40
 out2=$(recap feed1111 --traj_dir "$TRAJ_ROOT" --context --raw-tail 5 2>&1)
 rc=$?
+check "rollups use their structured schema" grep -q -- '--structured-result recap_rollup {' "$LLM_ARG_LOG"
 check "append: exits 0"             test "$rc" -eq 0
 check "append: old rows kept"       grep -q 'CACHE-SENTINEL' "$TSV"
 check "append: 40 signal rows"      test "$(wc -l < "$TSV" | tr -d ' ')" = "40"

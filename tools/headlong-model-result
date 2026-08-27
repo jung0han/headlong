@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ "${1:-}" == --help ]] && { echo "usage: headlong-model-result LLM NAME SCHEMA PROVIDER MODEL MAX_TOKENS SYSTEM"; exit 0; }
+
+# Shared Structured Model Result orchestration for bin/llm.
+llm_cli="${1:?llm path required}" name="${2:?operation required}" schema="${3:?schema required}"
+provider="${4:?provider required}" model="${5:?model required}" max_tokens="${6:?max tokens required}" system="${7:-}"
+mode="${LLM_STRUCTURED_OUTPUT_MODE:-json_object}"
+[[ "$mode" == strict || "$mode" == json_object ]] || { echo "llm: error: LLM_STRUCTURED_OUTPUT_MODE must be strict or json_object" >&2; exit 1; }
+
+schema_file=$(mktemp); result_file=$(mktemp); messages_file=$(mktemp)
+trap 'rm -f "$schema_file" "$result_file" "$messages_file"' EXIT
+printf '%s' "$schema" > "$schema_file"
+cat > "$messages_file"
+
+validator="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)/headlong-json-schema"
+[[ -x "$validator" ]] || validator=$(command -v headlong-json-schema || true)
+[[ -n "$validator" && -x "$validator" ]] || { echo "llm: error: headlong-json-schema is not installed" >&2; exit 1; }
+
+attempts=2; [[ "$mode" == strict ]] && attempts=1
+for (( attempt=1; attempt<=attempts; attempt++ )); do
+    structured_system="$system"; route_args=(--json-object)
+    if [[ "$mode" == strict ]]; then
+        route_args=(--response-schema "$name" "$schema_file")
+    else
+        structured_system+=$'\nReturn exactly one JSON object matching this JSON Schema:\n'"$schema"
+        (( attempt > 1 )) && structured_system+=$'\nThe previous object was invalid. Return one corrected object only.'
+    fi
+    child_args=(--no-stream --provider "$provider" -m "$model" -t "$max_tokens" --messages-file "$messages_file")
+    [[ -n "$structured_system" ]] && child_args+=(--system-prompt "$structured_system")
+    child_args+=("${route_args[@]}")
+    "$llm_cli" "${child_args[@]}" > "$result_file" || exit 1
+    "$validator" "$schema_file" < "$result_file" && exit 0
+done
+echo "llm: error: $name did not match schema after $attempts attempt(s)" >&2
+exit 1
