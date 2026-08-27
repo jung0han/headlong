@@ -11,7 +11,9 @@ tools live in [bin/](../bin/).
   `headlong-telegram-bridge` connect chat platforms into the mind.
 - `headlong-assistant` registers projects and runs the proposal-only Personal
   Assistant source adapters. `project add/list/remove` is the public boundary
-  for choosing which development work may be observed.
+  for choosing which development work may be observed;
+  `web-source add/list/remove`, `observe-web`, and `reference list/show` manage
+  bounded public sources and their immutable saved revisions.
 - `shellm-docker-broker` is the host-side policy server for brokered
   Docker. It is never present in the mind's environment.
 - `shellm-explore` visualizes run trees, `pr-committee` runs multi-model

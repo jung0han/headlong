@@ -15,6 +15,8 @@ THINKER_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 IDENTITY_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 CHAT_FROM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 ICON_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]+\.png$")
+REFERENCE_SOURCE_ID_RE = re.compile(r"^web-[0-9a-f]{20}$")
+REFERENCE_REVISION_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def contained_path(base: Path, *parts: str) -> Path:

@@ -23,6 +23,7 @@ from starlette.background import BackgroundTask
 
 from headlong_web import (
     activity,
+    assistant,
     chat,
     control,
     discovery,
@@ -547,6 +548,39 @@ def create_app(
         if not memory_path.is_file():
             raise HTTPException(status_code=404, detail="Memory not found")
         return {"name": name, "content": memory_path.read_text(encoding="utf-8", errors="replace")}
+
+    @app.get("/api/identities/{identity_id}/references")
+    def identity_references(identity_id: str) -> list[dict]:
+        identity = _identity_or_404(root, identity_id)
+        try:
+            return assistant.PersonalAssistant(root, identity).references()
+        except assistant.AssistantError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/identities/{identity_id}/references/{source_id}/{revision_id}"
+    )
+    def identity_reference(
+        identity_id: str, source_id: str, revision_id: str
+    ) -> dict:
+        identity = _identity_or_404(root, identity_id)
+        safety.checked_name(source_id, safety.REFERENCE_SOURCE_ID_RE)
+        safety.checked_name(revision_id, safety.REFERENCE_REVISION_ID_RE)
+        base = identity.path / "assistant" / "references"
+        revision_dir = safety.contained_path(base, source_id, revision_id)
+        # Resolve both levels through the public path guard before the store
+        # reader opens its fixed metadata/content filenames.
+        safety.contained_path(revision_dir, "metadata.json")
+        safety.contained_path(revision_dir, "content.txt")
+        try:
+            result = assistant.PersonalAssistant(root, identity).reference(
+                source_id, revision_id
+            )
+        except assistant.AssistantError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        if result is None:
+            raise HTTPException(status_code=404, detail="Reference not found")
+        return result
 
     @app.get("/api/identities/{identity_id}/recap")
     def identity_recap(identity_id: str) -> dict:
