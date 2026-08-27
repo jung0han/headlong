@@ -119,12 +119,15 @@ def observations(events: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
 def active_memories(events: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     """Return every promotion with its latest correctness evaluation."""
     rows = _unique_events(events)
-    latest = _latest_evaluations(rows, MEMORY_EVALUATION_SCHEMA, "memory_event_id")
+    history = _evaluations_by_target(
+        rows, MEMORY_EVALUATION_SCHEMA, "memory_event_id"
+    )
     output = []
     for event in rows:
         if event.get("type") != "memory-activated" or event.get("authority") != "active":
             continue
-        review = latest.get(event["event_id"])
+        reviews = history.get(event["event_id"], [])
+        review = reviews[-1] if reviews else None
         output.append(
             {
                 "event_id": event["event_id"],
@@ -134,6 +137,7 @@ def active_memories(events: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
                 "knowledge_scope": event.get("knowledge_scope"),
                 "activated_at": event.get("ts"),
                 "evaluation": _public_memory_evaluation(review),
+                "ever_incorrect": any(item.get("correct") is False for item in reviews),
             }
         )
     return output
@@ -155,8 +159,12 @@ def report(events: Iterable[dict[str, Any]], now: datetime) -> dict[str, Any]:
     incorrect = sum(
         1
         for item in promoted_memories
-        if item["evaluation"] is not None and not item["evaluation"]["correct"]
+        if item["ever_incorrect"]
     )
+    reviewed_memories = sum(
+        1 for item in promoted_memories if item["evaluation"] is not None
+    )
+    unreviewed_memories = len(promoted_memories) - reviewed_memories
 
     started_at = _started_at(final_observations)
     elapsed_seconds = (
@@ -166,7 +174,7 @@ def report(events: Iterable[dict[str, Any]], now: datetime) -> dict[str, Any]:
     count_threshold_reached = len(final_observations) >= MINIMUM_FINAL_CONSOLIDATIONS
     threshold_reached = duration_threshold_reached or count_threshold_reached
     quality_met = rate is not None and rate >= MINIMUM_USEFUL_ACCURATE_RATE
-    memory_safety_met = incorrect == 0
+    memory_safety_met = incorrect == 0 and unreviewed_memories == 0
     ready = threshold_reached and quality_met and memory_safety_met
 
     if started_at is None:
@@ -189,6 +197,9 @@ def report(events: Iterable[dict[str, Any]], now: datetime) -> dict[str, Any]:
         "reviewed_observation_count": len(reviewed),
         "useful_and_accurate_count": useful_accurate,
         "useful_and_accurate_rate": rate,
+        "active_memory_count": len(promoted_memories),
+        "reviewed_active_memory_count": reviewed_memories,
+        "unreviewed_active_memory_count": unreviewed_memories,
         "incorrect_active_memory_count": incorrect,
         "threshold": {
             "duration_days": 7,
@@ -202,6 +213,7 @@ def report(events: Iterable[dict[str, Any]], now: datetime) -> dict[str, Any]:
             "minimum_useful_and_accurate_rate": MINIMUM_USEFUL_ACCURATE_RATE,
             "quality_met": quality_met,
             "requires_zero_incorrect_active_memories": True,
+            "requires_all_active_memories_reviewed": True,
             "memory_safety_met": memory_safety_met,
         },
         "authority": dict(PROPOSAL_ONLY_AUTHORITY),
@@ -255,7 +267,14 @@ def _evaluation_event(
 def _latest_evaluations(
     events: list[dict[str, Any]], schema: str, target_field: str
 ) -> dict[str, dict[str, Any]]:
-    latest: dict[str, dict[str, Any]] = {}
+    history = _evaluations_by_target(events, schema, target_field)
+    return {target_id: rows[-1] for target_id, rows in history.items()}
+
+
+def _evaluations_by_target(
+    events: list[dict[str, Any]], schema: str, target_field: str
+) -> dict[str, list[dict[str, Any]]]:
+    history: dict[str, list[dict[str, Any]]] = {}
     known = {event.get("event_id"): event for event in events}
     for event in events:
         field = (
@@ -271,8 +290,8 @@ def _latest_evaluations(
             raise ShadowGateError("Shadow Gate evaluation references an unknown target")
         if event.get("execution_authority") != "none":
             raise ShadowGateError("Shadow Gate evaluation attempted to grant execution")
-        latest[target_id] = event
-    return latest
+        history.setdefault(target_id, []).append(event)
+    return history
 
 
 def _public_observation_evaluation(event: dict[str, Any] | None) -> dict[str, Any] | None:

@@ -340,8 +340,10 @@ _build_shellm_flags() {
     printf '%s\n' "--var" "MEM_DIR=$abs_mem_dir"
     printf '%s\n' "--var" "SKILLS_DIR=$abs_skills_dir"
     printf '%s\n' "--var" "SKILLS_KERNEL_DIR=$abs_kernel_dir"
-    printf '%s\n' "--var" "TRAJ_DIR=$abs_traj_dir"
-    printf '%s\n' "--var" "TRAJ_ID=$TRAJ_ID"
+    if [[ "${HEADLONG_PROPOSAL_ONLY:-0}" != "1" ]]; then
+        printf '%s\n' "--var" "TRAJ_DIR=$abs_traj_dir"
+        printf '%s\n' "--var" "TRAJ_ID=$TRAJ_ID"
+    fi
 
     # Propagate model + API keys to nested shellm calls. Inside Docker, .env
     # isn't mounted, so without these the nested call hits the final else in
@@ -358,23 +360,38 @@ _build_shellm_flags() {
             printf '%s\n' "--var" "$_route_var"
         fi
     done
-    for _ak in ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY OPENROUTER_API_KEY OPENCODE_API_KEY; do
-        if [[ -n "${!_ak:-}" ]]; then
-            export "${_ak?}"
-            printf '%s\n' "--var" "$_ak"
+    if [[ "${HEADLONG_PROPOSAL_ONLY:-0}" == "1" ]]; then
+        [[ "${LLM_PROVIDER:-}" == "openai" ]] \
+            || { printf 'proposal-only Observer requires LLM_PROVIDER=openai\n' >&2; return 1; }
+        if [[ -n "${OPENAI_API_KEY:-}" ]]; then
+            export OPENAI_API_KEY
+            printf '%s\n' "--var" "OPENAI_API_KEY"
         fi
-    done
+    else
+        for _ak in ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY OPENROUTER_API_KEY OPENCODE_API_KEY; do
+            if [[ -n "${!_ak:-}" ]]; then
+                export "${_ak?}"
+                printf '%s\n' "--var" "$_ak"
+            fi
+        done
+    fi
 
-    # Skill-declared vars
-    while IFS= read -r vname; do
-        [[ -z "$vname" ]] && continue
-        local vval="${!vname:-}"
-        [[ -n "$vval" ]] && printf '%s\n' "--var" "$vname=$vval"
-    done < <(collect_skill_vars "$identity_dir")
+    # Skill credentials belong to ordinary identities, not the proposal-only
+    # Observer. Its only forwarded secret is the selected LiteLLM route key.
+    if [[ "${HEADLONG_PROPOSAL_ONLY:-0}" != "1" ]]; then
+        while IFS= read -r vname; do
+            [[ -z "$vname" ]] && continue
+            local vval="${!vname:-}"
+            [[ -n "$vval" ]] && printf '%s\n' "--var" "$vname=$vval"
+        done < <(collect_skill_vars "$identity_dir")
+    fi
 
     # Standard binaries
     local cmd
     for cmd in mem traj skills context llm shellm chat glob view put sub; do
+        if [[ "$cmd" == "traj" && "${HEADLONG_PROPOSAL_ONLY:-0}" == "1" ]]; then
+            continue
+        fi
         local path
         path=$(command -v "$cmd" 2>/dev/null) || continue
         printf '%s\n' "--bin" "$path"

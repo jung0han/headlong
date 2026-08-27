@@ -11,6 +11,8 @@ __pycache__/
 
 # Identity instances are runtime data (logs, trajectories, memories, etc.)
 .identities/
+.assistant-authority/
+.assistant-observers/
 web/src/headlong_web/static/
 web/viewer/build/
 web/viewer/node_modules/

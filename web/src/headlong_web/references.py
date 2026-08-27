@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any
 from urllib import error, parse, request
 
+from headlong_web.knowledge import KnowledgeScope, KnowledgeScopeError
+
 
 REFERENCE_SCHEMA = "headlong.reference-revision/v1"
 REJECTION_SCHEMA = "headlong.reference-rejection/v1"
@@ -541,7 +543,7 @@ def read_reference(
         metadata = json.loads(
             (revision_dir / "metadata.json").read_text(encoding="utf-8")
         )
-        _validate_metadata(metadata, source, revision)
+        metadata = _validate_metadata(metadata, source, revision)
         if not (revision_dir / "content.txt").is_file():
             return None
         if include_text:
@@ -583,7 +585,12 @@ def store_reference(
     fetched_at: str,
     title: str,
     summary: str,
+    knowledge_scope: KnowledgeScope | dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], bool]:
+    try:
+        scope = KnowledgeScope.parse(knowledge_scope, legacy_global=True)
+    except KnowledgeScopeError as exc:
+        raise ReferenceError(str(exc), code="invalid_scope") from exc
     sid = source_id(document.source_url)
     digest = document.digest
     existing = read_reference(identity_dir, sid, digest, include_text=False)
@@ -600,6 +607,7 @@ def store_reference(
         "media_type": document.media_type,
         "title": title,
         "summary": summary,
+        "knowledge_scope": scope.to_dict(),
         "evidence_locator": locator.to_dict(),
     }
     if document.resolved_url is not None:
@@ -646,6 +654,10 @@ def read_rejection(
         return None
     except (OSError, json.JSONDecodeError) as exc:
         raise ReferenceError("cannot read Reference rejection", code="storage_failed") from exc
+    try:
+        scope = KnowledgeScope.parse(metadata.get("knowledge_scope"), legacy_global=True)
+    except (AttributeError, KnowledgeScopeError) as exc:
+        raise ReferenceError("invalid Reference rejection scope", code="storage_failed") from exc
     if (
         not isinstance(metadata, dict)
         or metadata.get("schema") != REJECTION_SCHEMA
@@ -657,6 +669,7 @@ def read_rejection(
         or not isinstance(metadata.get("rejected_at"), str)
     ):
         raise ReferenceError("invalid Reference rejection metadata", code="storage_failed")
+    metadata["knowledge_scope"] = scope.to_dict()
     return metadata
 
 
@@ -684,6 +697,7 @@ def store_rejection(
     *,
     rejected_at: str,
     judgment: str,
+    knowledge_scope: KnowledgeScope | dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], bool]:
     """Persist only identity, digest, judgment, and locator for rejected text."""
     sid = source_id(document.source_url)
@@ -691,6 +705,10 @@ def store_rejection(
     existing = read_rejection(identity_dir, sid, digest)
     if existing is not None:
         return existing, False
+    try:
+        scope = KnowledgeScope.parse(knowledge_scope, legacy_global=True)
+    except KnowledgeScopeError as exc:
+        raise ReferenceError(str(exc), code="invalid_scope") from exc
     metadata = {
         "schema": REJECTION_SCHEMA,
         "source_id": sid,
@@ -699,6 +717,7 @@ def store_rejection(
         "content_digest": digest,
         "rejected_at": rejected_at,
         "judgment": judgment,
+        "knowledge_scope": scope.to_dict(),
         "evidence_locator": ReferenceLocator(
             document.source_url, sid, digest, digest, kind="web_reference_rejection"
         ).to_dict(),
@@ -832,9 +851,13 @@ def write_source_health(
     return health
 
 
-def _validate_metadata(metadata: Any, source: str, revision: str) -> None:
+def _validate_metadata(metadata: Any, source: str, revision: str) -> dict[str, Any]:
     if not isinstance(metadata, dict):
         raise ValueError("Reference metadata is not an object")
+    try:
+        scope = KnowledgeScope.parse(metadata.get("knowledge_scope"), legacy_global=True)
+    except KnowledgeScopeError as exc:
+        raise ValueError("Reference metadata has invalid Knowledge Scope") from exc
     locator = metadata.get("evidence_locator")
     if (
         metadata.get("schema") != REFERENCE_SCHEMA
@@ -852,6 +875,8 @@ def _validate_metadata(metadata: Any, source: str, revision: str) -> None:
         != ReferenceLocator(metadata["source_url"], source, revision, revision).to_dict()
     ):
         raise ValueError("Reference metadata does not match its revision")
+    metadata["knowledge_scope"] = scope.to_dict()
+    return metadata
 
 
 def _durable_write(path: Path, text: str) -> None:

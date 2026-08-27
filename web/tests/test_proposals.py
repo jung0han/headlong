@@ -210,11 +210,11 @@ def test_direct_evidence_becomes_reviewable_without_external_mutation(
     )
     assert rebuilt is not None
     assert rebuilt["review_state"] == "pending"
-    reviews = [
-        event for event in _events(identity_path) if event.get("type") == "proposal-review"
-    ]
-    assert len(reviews) == 4
-    assert all(event["execution_authority"] == "none" for event in reviews)
+    assert not any(
+        event.get("type") == "proposal-review" for event in _events(identity_path)
+    )
+    authority_journals = list((root / ".assistant-authority").glob("*/events.jsonl"))
+    assert len(authority_journals) == 1
     assert canary.read_text() == "must stay unchanged\n"
     assert sorted(path.name for path in project.iterdir()) == ["work.txt"]
 

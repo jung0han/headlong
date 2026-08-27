@@ -15,6 +15,8 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from headlong_web.knowledge import KnowledgeScope, KnowledgeScopeError
+
 PROJECTION_SCHEMA = "headlong.active-memory-projection/v1"
 MEMORY_KINDS = frozenset({"decision", "preference", "constraint"})
 AUTHORITY_BASES = frozenset({"explicit_user_statement", "user_accepted_candidate"})
@@ -79,13 +81,14 @@ def select_scope(
         raise ActiveMemoryError("choose project or global scope, not both")
     selected: list[dict[str, Any]] = []
     for record in records:
-        scope = record["knowledge_scope"]
+        try:
+            scope = KnowledgeScope.parse(record["knowledge_scope"])
+        except KnowledgeScopeError as exc:
+            raise ActiveMemoryError(str(exc)) from exc
         if global_only:
-            keep = scope == {"kind": "global"}
+            keep = scope.kind == "global"
         elif project_id is not None:
-            keep = scope == {"kind": "project", "project_id": project_id} or (
-                include_global and scope == {"kind": "global"}
-            )
+            keep = scope.eligible_for(project_id, include_global=include_global)
         else:
             keep = True
         if keep:
@@ -262,11 +265,12 @@ def _validate_public_record(record: dict[str, Any]) -> dict[str, Any]:
         raise ActiveMemoryError(
             "Active Memory projection has empty identity or content"
         )
-    scope = record["knowledge_scope"]
-    if not isinstance(scope, dict) or scope.get("kind") not in {"project", "global"}:
-        raise ActiveMemoryError("Active Memory projection has invalid Knowledge Scope")
-    if scope["kind"] == "project" and not isinstance(scope.get("project_id"), str):
-        raise ActiveMemoryError("project Active Memory requires project_id")
+    try:
+        record["knowledge_scope"] = KnowledgeScope.parse(
+            record["knowledge_scope"]
+        ).to_dict()
+    except KnowledgeScopeError as exc:
+        raise ActiveMemoryError(str(exc)) from exc
     if record["memory_kind"] not in MEMORY_KINDS:
         raise ActiveMemoryError("Active Memory projection has invalid memory kind")
     if (

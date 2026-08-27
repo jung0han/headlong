@@ -233,7 +233,7 @@ def test_complete_product_gate_is_restart_safe_rebuildable_and_proposal_only(
     assert report["final_consolidation_count"] == 20
     assert report["reviewed_observation_count"] == 20
     assert report["useful_and_accurate_rate"] == 0.8
-    assert report["incorrect_active_memory_count"] == 0
+    assert report["incorrect_active_memory_count"] == 1
     assert report["threshold"] == {
         "duration_days": 7,
         "final_consolidations": 20,
@@ -242,7 +242,7 @@ def test_complete_product_gate_is_restart_safe_rebuildable_and_proposal_only(
         "final_count_reached": True,
         "reached": True,
     }
-    assert report["ready"] is True
+    assert report["ready"] is False
     assert report["authority"] == {
         "mode": "proposal_only",
         "external_writes_enabled": False,
@@ -268,8 +268,12 @@ def test_complete_product_gate_is_restart_safe_rebuildable_and_proposal_only(
     }
     assert external_after == external_before
     ledger = _ledger(identity)
-    assert len([e for e in ledger if e.get("type") == "observation-evaluation"]) == 20
-    assert len([e for e in ledger if e.get("type") == "active-memory-evaluation"]) == 2
+    assert not any(
+        e.get("type") in {"observation-evaluation", "active-memory-evaluation"}
+        for e in ledger
+    )
+    authority_journals = list((root / ".assistant-authority").glob("*/events.jsonl"))
+    assert len(authority_journals) == 1
 
 
 def test_seven_elapsed_days_reaches_maturity_without_enabling_authority(
