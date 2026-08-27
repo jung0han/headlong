@@ -260,6 +260,9 @@ export interface ShadowGateReport {
   useful_and_accurate_count: number;
   useful_and_accurate_rate: number | null;
   incorrect_active_memory_count: number;
+  active_memory_count: number;
+  reviewed_active_memory_count: number;
+  unreviewed_active_memory_count: number;
   threshold: {
     duration_days: 7;
     final_consolidations: 20;
@@ -272,6 +275,7 @@ export interface ShadowGateReport {
     minimum_useful_and_accurate_rate: 0.8;
     quality_met: boolean;
     requires_zero_incorrect_active_memories: true;
+    requires_all_active_memories_reviewed: true;
     memory_safety_met: boolean;
   };
   authority: {

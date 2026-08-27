@@ -44,6 +44,24 @@ PIDFile=@SHELLM_HOME@/app/.identities/%i/run/dispatcher.pid
 User=shellm
 WorkingDirectory=@SHELLM_HOME@/app
 Environment="PATH=@SHELLM_HOME@/.local/bin:@SHELLM_HOME@/.bun/bin:/usr/local/bin:/usr/bin:/bin"
+# PersonalAssistant creates this marker outside the actor-visible identity.
+# Other HeadLong identities keep their existing runtime behavior.
+EnvironmentFile=-@SHELLM_HOME@/app/.assistant-observers/%i.env
+# Defense in depth for host-side launch code. The generated proposal-only actor
+# is additionally required to run in shellm's Docker environment and is not
+# given project mounts, trajectory paths, or unrelated skill credentials.
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=@SHELLM_HOME@/app/.identities/%i @SHELLM_HOME@/.headlong-thinkers @SHELLM_HOME@/.shellm
+InaccessiblePaths=@SHELLM_HOME@/app/.assistant-authority @SHELLM_HOME@/app/.assistant-observers
 ExecStart=/bin/bash @SHELLM_HOME@/app/deploy/thinkers-service.sh @SHELLM_HOME@/app %i start
 ExecStop=/bin/bash @SHELLM_HOME@/app/deploy/thinkers-service.sh @SHELLM_HOME@/app %i stop
 # Restart=on-failure cannot resurrect a deliberately stopped mind: every

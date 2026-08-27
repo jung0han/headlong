@@ -135,8 +135,49 @@ def _setup_scoped_knowledge(
         fetched_at="2026-08-27T02:00:00Z",
         title="Ruff migration guide",
         summary="A concise guide to adopting Ruff format.",
+        knowledge_scope={"kind": "global"},
     )
     return root, identity_dir, assistant, registered_a.id, registered_b.id
+
+
+def test_reference_scope_is_filtered_before_ranking(tmp_path: Path):
+    root, identity_dir, assistant, project_a, project_b = _setup_scoped_knowledge(
+        tmp_path
+    )
+    references.store_reference(
+        identity_dir,
+        references.FetchedDocument(
+            source_url="https://example.com/project-a-secret",
+            media_type="text/plain",
+            text="Project Alpha uses a secret marmalade deployment rule.",
+        ),
+        fetched_at="2026-08-27T03:00:00Z",
+        title="Marmalade deployment rule",
+        summary="A project-local marmalade rule.",
+        knowledge_scope={"kind": "project", "project_id": project_a},
+    )
+
+    visible = assistant.response_context("marmalade deployment", project_a)
+    hidden = assistant.response_context("marmalade deployment", project_b)
+    assert [item["title"] for item in visible["references"]] == [
+        "Marmalade deployment rule"
+    ]
+    assert hidden["references"] == []
+
+
+def test_legacy_reference_without_scope_remains_explicitly_global(tmp_path: Path):
+    _root, identity_dir, assistant, project_a, _project_b = _setup_scoped_knowledge(
+        tmp_path
+    )
+    metadata_path = next(
+        (identity_dir / "assistant" / "references").glob("web-*/*/metadata.json")
+    )
+    metadata = json.loads(metadata_path.read_text())
+    metadata.pop("knowledge_scope")
+    metadata_path.write_text(json.dumps(metadata))
+
+    context = assistant.response_context("Ruff migration", project_a)
+    assert context["references"][0]["knowledge_scope"] == {"kind": "global"}
 
 
 def _configure_model(monkeypatch, model: FakeResponseModel, tmp_path: Path) -> None:

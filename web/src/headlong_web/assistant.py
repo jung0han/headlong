@@ -12,7 +12,6 @@ import hashlib
 import json
 import os
 import socket
-import subprocess
 import time
 import uuid
 from contextlib import contextmanager
@@ -24,15 +23,15 @@ from urllib.parse import urlsplit
 
 from headlong_web import (
     active_memory,
+    assistant_services,
     codex_analysis,
-    control,
     discovery,
     hacker_news,
+    knowledge,
+    model_gateway,
     proposals,
     references,
     retrieval,
-    shadow_gate,
-    trajectory,
     web_exploration,
 )
 from headlong_web.codex_bridge import (
@@ -226,8 +225,16 @@ class PersonalAssistant:
         self.identity = identity
         self.state_dir = identity.path / "assistant"
         self.registrations_file = self.state_dir / "registrations.json"
+        try:
+            self._ledger = assistant_services.ActivityLedger(self.root, identity)
+        except assistant_services.AssistantServiceError as exc:
+            raise AssistantError(str(exc)) from exc
+        self._model = model_gateway.ModelGateway(self.root, identity)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._monotonic = monotonic or time.monotonic
+        self._governance = assistant_services.GovernanceService(
+            self._ledger, clock=self._now
+        )
 
     def projects(self) -> list[RegisteredProject]:
         data = self._read_registrations()
@@ -542,6 +549,7 @@ class PersonalAssistant:
                             or selection["title"]
                             or "not selected during bounded exploration"
                         ),
+                        knowledge_scope=trigger["knowledge_scope"],
                     )
                     event = reference_rejection_event(metadata)
                     if not self._ledger_has(event["event_id"]):
@@ -571,6 +579,7 @@ class PersonalAssistant:
                     fetched_at=attempted_at,
                     title=str(selection["title"]),
                     summary=str(selection["summary"]),
+                    knowledge_scope=trigger["knowledge_scope"],
                 )
                 event = reference_revision_event(metadata)
                 if not self._ledger_has(event["event_id"]):
@@ -635,6 +644,9 @@ class PersonalAssistant:
             "source": "active_memory" if trigger_kind == "interest" else "memory_candidate",
             "event_id": str(record["event_id"]),
             "content": content.strip(),
+            "knowledge_scope": knowledge.KnowledgeScope.parse(
+                record.get("knowledge_scope"), legacy_global=True
+            ).to_dict(),
         }
 
     def _consider_web_document(
@@ -725,6 +737,7 @@ class PersonalAssistant:
                     document,
                     rejected_at=attempted_at,
                     judgment=judgment,
+                    knowledge_scope=knowledge.KnowledgeScope.global_scope(),
                 )
             except references.ReferenceError as exc:
                 self._record_web_failure(
@@ -754,6 +767,7 @@ class PersonalAssistant:
                 fetched_at=_utc_now(),
                 title=selection["title"],
                 summary=selection["summary"],
+                knowledge_scope=knowledge.KnowledgeScope.global_scope(),
             )
         except references.ReferenceError as exc:
             self._record_web_failure(
@@ -870,46 +884,36 @@ class PersonalAssistant:
     def proposals(self) -> list[dict[str, Any]]:
         """Return the Proposal Inbox rebuilt from the canonical ledger."""
         try:
-            return proposals.build_inbox(self._ledger_events())
-        except proposals.ProposalError as exc:
+            return self._governance.proposals()
+        except assistant_services.AssistantServiceError as exc:
             raise AssistantError(str(exc)) from exc
 
     def proposal(self, proposal_id: str) -> dict[str, Any] | None:
         try:
-            return proposals.find_proposal(self._ledger_events(), proposal_id)
-        except proposals.ProposalError as exc:
+            return self._governance.proposal(proposal_id)
+        except assistant_services.AssistantServiceError as exc:
             raise AssistantError(str(exc)) from exc
 
     def review_proposal(self, proposal_id: str, state: str) -> dict[str, Any]:
         """Append one review event and return the rebuilt current proposal."""
         with self._state_lock():
-            current = self.proposal(proposal_id)
-            if current is None:
-                raise AssistantError(
-                    f"Work Improvement Proposal not found: {proposal_id}"
-                )
             try:
-                event = proposals.review_event(current, state)
-            except proposals.ProposalError as exc:
+                return self._governance.review_proposal(proposal_id, state)
+            except assistant_services.AssistantServiceError as exc:
                 raise AssistantError(str(exc)) from exc
-            self._append_event(event)
-            reviewed = self.proposal(proposal_id)
-            if reviewed is None:  # The append succeeded, so this is ledger corruption.
-                raise AssistantError("reviewed proposal disappeared from the ledger")
-            return reviewed
 
     def shadow_gate_report(self) -> dict[str, Any]:
         """Return the live, ledger-derived proposal-only evaluation report."""
         try:
-            return shadow_gate.report(self._ledger_events(), self._now())
-        except shadow_gate.ShadowGateError as exc:
+            return self._governance.shadow_report()
+        except assistant_services.AssistantServiceError as exc:
             raise AssistantError(str(exc)) from exc
 
     def shadow_gate_observations(self) -> list[dict[str, Any]]:
         """Return reviewable Final Consolidations and their latest judgments."""
         try:
-            return shadow_gate.observations(self._ledger_events())
-        except shadow_gate.ShadowGateError as exc:
+            return self._governance.observations()
+        except assistant_services.AssistantServiceError as exc:
             raise AssistantError(str(exc)) from exc
 
     def review_observation(
@@ -917,29 +921,20 @@ class PersonalAssistant:
     ) -> dict[str, Any]:
         """Append a human evaluation without granting any execution authority."""
         with self._state_lock():
-            events = self._ledger_events()
             try:
-                event = shadow_gate.observation_evaluation_event(
-                    events,
+                return self._governance.review_observation(
                     observation_event_id,
                     useful=useful,
                     accurate=accurate,
-                    reviewed_at=self._now(),
                 )
-            except shadow_gate.ShadowGateError as exc:
+            except assistant_services.AssistantServiceError as exc:
                 raise AssistantError(str(exc)) from exc
-            self._append_event(event)
-            return next(
-                item
-                for item in shadow_gate.observations([*events, event])
-                if item["event_id"] == event["observation_event_id"]
-            )
 
     def shadow_gate_memories(self) -> list[dict[str, Any]]:
         """Return every Active Memory promotion and its latest judgment."""
         try:
-            return shadow_gate.active_memories(self._ledger_events())
-        except shadow_gate.ShadowGateError as exc:
+            return self._governance.memories()
+        except assistant_services.AssistantServiceError as exc:
             raise AssistantError(str(exc)) from exc
 
     def review_active_memory(
@@ -947,22 +942,12 @@ class PersonalAssistant:
     ) -> dict[str, Any]:
         """Append a human evaluation of memory-promotion correctness."""
         with self._state_lock():
-            events = self._ledger_events()
             try:
-                event = shadow_gate.memory_evaluation_event(
-                    events,
-                    memory_event_id,
-                    correct=correct,
-                    reviewed_at=self._now(),
+                return self._governance.review_memory(
+                    memory_event_id, correct=correct
                 )
-            except shadow_gate.ShadowGateError as exc:
+            except assistant_services.AssistantServiceError as exc:
                 raise AssistantError(str(exc)) from exc
-            self._append_event(event)
-            return next(
-                item
-                for item in shadow_gate.active_memories([*events, event])
-                if item["event_id"] == event["memory_event_id"]
-            )
 
     def memory_candidates(
         self,
@@ -997,13 +982,16 @@ class PersonalAssistant:
             self._resolve_project(project_selector).id if project_selector else None
         )
         try:
+            projection = retrieval.ensure_active_projection(
+                self.identity.path, self._ledger_events()
+            )
             return active_memory.select_scope(
-                active_memory.read_projection(self.identity.path),
+                projection,
                 project_id=project_id,
                 global_only=global_only,
                 include_global=include_global,
             )
-        except active_memory.ActiveMemoryError as exc:
+        except (active_memory.ActiveMemoryError, retrieval.RetrievalError) as exc:
             raise AssistantError(str(exc)) from exc
 
     def response_context(
@@ -1062,28 +1050,16 @@ class PersonalAssistant:
             },
             ensure_ascii=False,
         )
-        env = control.identity_env(self.identity, self.root)
-        cmd = control._wrap(
-            "llm", "--no-stream", "-t", "600", "--system-prompt", system
-        )
         try:
-            proc = subprocess.run(
-                cmd,
-                cwd=self.root,
-                env=env,
-                input=prompt,
-                text=True,
-                capture_output=True,
-                timeout=600,
+            response = self._model.complete_text(
+                prompt,
+                system=system,
+                token_timeout=600,
+                operation="assistant response model",
+                max_chars=12_000,
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise AssistantError("assistant response model failed to run") from exc
-        if proc.returncode != 0:
-            detail = (proc.stderr or "model call failed").strip().splitlines()[-1]
-            raise AssistantError(f"assistant response model failed: {detail}")
-        response = proc.stdout.strip()
-        if not response or len(response) > 12_000:
-            raise AssistantError("model response is empty or exceeds compact limits")
+        except model_gateway.ModelGatewayError as exc:
+            raise AssistantError(str(exc)) from exc
         return {
             "response": response,
             "project_id": context["project_id"],
@@ -1117,14 +1093,14 @@ class PersonalAssistant:
         if global_scope and project_selector is not None:
             raise AssistantError("choose project or global scope, not both")
         if global_scope:
-            scope = {"kind": "global"}
+            scope = knowledge.KnowledgeScope.global_scope()
         else:
             project = (
                 self._resolve_project(project_selector)
                 if project_selector
                 else self._project_for_current_path(current_path or Path.cwd())
             )
-            scope = {"kind": "project", "project_id": project.id}
+            scope = knowledge.KnowledgeScope.project(project.id)
         with self._state_lock():
             event = self._activation_event(
                 content=content,
@@ -1166,18 +1142,19 @@ class PersonalAssistant:
             if candidate is None:
                 raise AssistantError("current Memory Candidate not found")
             if global_scope:
-                scope = {"kind": "global"}
+                scope = knowledge.KnowledgeScope.global_scope()
             elif project_selector:
-                scope = {
-                    "kind": "project",
-                    "project_id": self._resolve_project(project_selector).id,
-                }
-                if scope != candidate["knowledge_scope"]:
+                scope = knowledge.KnowledgeScope.project(
+                    self._resolve_project(project_selector).id
+                )
+                if scope != knowledge.KnowledgeScope.parse(
+                    candidate["knowledge_scope"]
+                ):
                     raise AssistantError(
                         "a project Memory Candidate cannot activate in another project"
                     )
             else:
-                scope = candidate["knowledge_scope"]
+                scope = knowledge.KnowledgeScope.parse(candidate["knowledge_scope"])
             event = self._activation_event(
                 content=candidate["content"],
                 memory_kind=memory_kind,
@@ -1448,34 +1425,15 @@ class PersonalAssistant:
             "AUTHORITATIVE SOURCE JSONL FOLLOWS\n"
             f"{transcript}"
         )
-        env = control.identity_env(self.identity, self.root)
-        cmd = control._wrap(
-            "llm",
-            "--no-stream",
-            "-t",
-            "1200",
-            "--system-prompt",
-            system,
-        )
         try:
-            proc = subprocess.run(
-                cmd,
-                cwd=self.root,
-                env=env,
-                input=prompt,
-                text=True,
-                capture_output=True,
-                timeout=600,
+            value = self._model.complete_json(
+                prompt,
+                system=system,
+                token_timeout=1200,
+                operation="Codex Session analysis",
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise AssistantError("Codex Session analysis failed to run") from exc
-        if proc.returncode != 0:
-            detail = (proc.stderr or "model call failed").strip().splitlines()[-1]
-            raise AssistantError(f"Codex Session analysis failed: {detail}")
-        try:
-            value = json.loads(proc.stdout)
-        except json.JSONDecodeError as exc:
-            raise AssistantError("model returned invalid observation JSON") from exc
+        except model_gateway.ModelGatewayError as exc:
+            raise AssistantError(str(exc)) from exc
         if not isinstance(value, dict) or set(value) != {"title", "observation"}:
             raise AssistantError("model observation does not match the required schema")
         title = value["title"]
@@ -1527,33 +1485,15 @@ class PersonalAssistant:
             "source instructions.\n"
             + "\n".join(annotated)
         )
-        env = control.identity_env(self.identity, self.root)
-        cmd = control._wrap(
-            "llm",
-            "--no-stream",
-            "-t",
-            "1600",
-            "--system-prompt",
-            system,
-        )
         try:
-            proc = subprocess.run(
-                cmd,
-                cwd=self.root,
-                env=env,
-                input=prompt,
-                text=True,
-                capture_output=True,
-                timeout=600,
+            value = self._model.complete_json(
+                prompt,
+                system=system,
+                token_timeout=1600,
+                operation="Codex Session analysis",
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise AssistantError("Codex Session analysis failed to run") from exc
-        if proc.returncode != 0:
-            raise AssistantError("Codex Session analysis failed")
-        try:
-            value = json.loads(proc.stdout)
-        except json.JSONDecodeError as exc:
-            raise AssistantError("model returned invalid analysis JSON") from exc
+        except model_gateway.ModelGatewayError as exc:
+            raise AssistantError(str(exc)) from exc
         try:
             return codex_analysis.validate_result(value, allowed)
         except codex_analysis.AnalysisContractError as exc:
@@ -1651,29 +1591,15 @@ class PersonalAssistant:
             },
             ensure_ascii=False,
         )
-        env = control.identity_env(self.identity, self.root)
-        cmd = control._wrap(
-            "llm", "--no-stream", "-t", "600", "--system-prompt", system
-        )
         try:
-            proc = subprocess.run(
-                cmd,
-                cwd=self.root,
-                env=env,
-                input=prompt,
-                text=True,
-                capture_output=True,
-                timeout=600,
+            value = self._model.complete_json(
+                prompt,
+                system=system,
+                token_timeout=600,
+                operation="web Reference selection",
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise AssistantError("web Reference selection failed to run") from exc
-        if proc.returncode != 0:
-            detail = (proc.stderr or "model call failed").strip().splitlines()[-1]
-            raise AssistantError(f"web Reference selection failed: {detail}")
-        try:
-            value = json.loads(proc.stdout)
-        except json.JSONDecodeError as exc:
-            raise AssistantError("model returned invalid Reference selection JSON") from exc
+        except model_gateway.ModelGatewayError as exc:
+            raise AssistantError(str(exc)) from exc
         if not isinstance(value, dict) or set(value) != {"selected", "title", "summary"}:
             raise AssistantError("model Reference selection does not match the required schema")
         selected, title, summary = value["selected"], value["title"], value["summary"]
@@ -1692,10 +1618,10 @@ class PersonalAssistant:
         return event_id in self._ledger_event_ids()
 
     def _ledger_events(self) -> list[dict[str, Any]]:
-        traj_dir = discovery.find_root_traj_dir(self.identity)
-        if traj_dir is None:
-            raise AssistantError("Observer Identity has no root trajectory")
-        return list(trajectory.iter_jsonl(traj_dir / "trajectory.jsonl"))
+        try:
+            return self._ledger.events()
+        except assistant_services.AssistantServiceError as exc:
+            raise AssistantError(str(exc)) from exc
 
     def _ledger_event_ids(self) -> set[str]:
         return {
@@ -1775,7 +1701,7 @@ class PersonalAssistant:
         content: str,
         memory_kind: str,
         memory_key: str,
-        knowledge_scope: dict[str, str],
+        knowledge_scope: knowledge.KnowledgeScope,
         authority_basis: str,
         evidence_locators: list[dict[str, Any]],
         causal_event_ids: list[str],
@@ -1791,7 +1717,8 @@ class PersonalAssistant:
             item["event_id"]
             for item in current
             if item["memory_key"] == memory_key
-            and item["knowledge_scope"] == knowledge_scope
+            and knowledge.KnowledgeScope.parse(item["knowledge_scope"])
+            == knowledge_scope
         ]
         supersedes = list(dict.fromkeys([*previous, *additionally_supersedes]))
         event_id = str(uuid.uuid4())
@@ -1868,24 +1795,10 @@ class PersonalAssistant:
             raise AssistantError("Active Memory key is empty or invalid")
 
     def _append_event(self, event: dict[str, Any]) -> None:
-        proc = subprocess.run(
-            [
-                str(control.BIN_DIR / "traj"),
-                "append",
-                "--traj_dir",
-                str(self.identity.path / "trajectories"),
-                str(self.identity.root_trajectory),
-            ],
-            cwd=self.root,
-            env=control.identity_env(self.identity, self.root),
-            input=json.dumps(event, separators=(",", ":")),
-            text=True,
-            capture_output=True,
-            timeout=30,
-        )
-        if proc.returncode != 0:
-            detail = (proc.stderr or "trajectory append failed").strip().splitlines()[-1]
-            raise AssistantError(detail)
+        try:
+            self._ledger.append(event)
+        except assistant_services.AssistantServiceError as exc:
+            raise AssistantError(str(exc)) from exc
 
     def _read_registrations(self) -> dict[str, Any]:
         try:
@@ -2056,7 +1969,7 @@ def observation_event(
         event_id=event_id,
         source_kind="codex_session",
         source_identity=session.id,
-        knowledge_scope={"kind": "project", "project_id": project.id},
+        knowledge_scope=knowledge.KnowledgeScope.project(project.id),
         evidence_kind="model_inference",
         verification="observed",
         authority="candidate",
@@ -2086,7 +1999,7 @@ def analysis_event(
         event_id=event_id,
         source_kind="codex_session",
         source_identity=source.id,
-        knowledge_scope={"kind": "project", "project_id": project.id},
+        knowledge_scope=knowledge.KnowledgeScope.project(project.id),
         evidence_kind="model_inference",
         verification="observed",
         authority="candidate",
@@ -2135,7 +2048,7 @@ def analysis_status_event(
         event_id=event_id,
         source_kind="codex_session",
         source_identity=source.id,
-        knowledge_scope={"kind": "project", "project_id": project.id},
+        knowledge_scope=knowledge.KnowledgeScope.project(project.id),
         evidence_kind="observed_event",
         verification=verification,
         authority=authority,
@@ -2165,7 +2078,7 @@ def reference_revision_event(metadata: dict[str, Any]) -> dict[str, Any]:
         event_id=event_id,
         source_kind="web_source",
         source_identity=metadata["source_url"],
-        knowledge_scope={"kind": "global"},
+        knowledge_scope=metadata["knowledge_scope"],
         evidence_kind="primary_source",
         verification="observed",
         authority="candidate",
@@ -2203,7 +2116,7 @@ def source_event(
         event_id=event_id,
         source_kind="codex_session",
         source_identity=source.id,
-        knowledge_scope={"kind": "project", "project_id": project.id},
+        knowledge_scope=knowledge.KnowledgeScope.project(project.id),
         evidence_kind="observed_event",
         verification="observed",
         authority="candidate",
@@ -2233,7 +2146,7 @@ def reference_rejection_event(metadata: dict[str, Any]) -> dict[str, Any]:
         event_id=event_id,
         source_kind="web_source",
         source_identity=metadata["source_url"],
-        knowledge_scope={"kind": "global"},
+        knowledge_scope=metadata["knowledge_scope"],
         evidence_kind="primary_source",
         verification="observed",
         authority="rejected",
@@ -2255,7 +2168,7 @@ def activity_event(
     event_id: str,
     source_kind: str,
     source_identity: str,
-    knowledge_scope: dict[str, str],
+    knowledge_scope: knowledge.KnowledgeScope | dict[str, str],
     evidence_kind: str,
     verification: str,
     authority: str,
@@ -2267,11 +2180,10 @@ def activity_event(
     details: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the v1 envelope future source and projection modules share."""
-    scope_kind = knowledge_scope.get("kind")
-    if scope_kind not in {"project", "global"}:
-        raise AssistantError("Activity Ledger event has invalid Knowledge Scope")
-    if scope_kind == "project" and not knowledge_scope.get("project_id"):
-        raise AssistantError("project-scoped event requires project_id")
+    try:
+        scope = knowledge.KnowledgeScope.parse(knowledge_scope)
+    except knowledge.KnowledgeScopeError as exc:
+        raise AssistantError(str(exc)) from exc
     if evidence_kind not in {
         "user_statement",
         "observed_event",
@@ -2304,7 +2216,7 @@ def activity_event(
         "source": "personal_assistant",
         "source_kind": source_kind,
         "source_identity": source_identity,
-        "knowledge_scope": knowledge_scope,
+        "knowledge_scope": scope.to_dict(),
         "evidence_kind": evidence_kind,
         "verification": verification,
         "authority": authority,

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from headlong_web import active_memory, references
+from headlong_web.knowledge import KnowledgeScope, KnowledgeScopeError
 
 CONTEXT_SCHEMA = "headlong.assistant-response-context/v1"
 LOCATOR_SCHEMA = "headlong.evidence-locator/v1"
@@ -91,7 +92,7 @@ def assemble_context(
 
     terms = _tokens(query)
     memories = _rank_memories(eligible_memories, terms, identity_id)[:max_memories]
-    reference_rows = _reference_candidates(identity_dir, terms)[:max_references]
+    reference_rows = _reference_candidates(identity_dir, terms, project_id)[:max_references]
     memories, reference_rows = _fit_budget(
         memories, reference_rows, max_context_chars=max_context_chars
     )
@@ -224,7 +225,7 @@ def _rank_memories(
 
 
 def _reference_candidates(
-    identity_dir: Path, terms: frozenset[str]
+    identity_dir: Path, terms: frozenset[str], project_id: str
 ) -> list[dict[str, Any]]:
     try:
         metadata_rows = references.list_references(identity_dir)
@@ -233,6 +234,15 @@ def _reference_candidates(
     candidates: list[tuple[dict[str, Any], str]] = []
     index = _LexicalIndex()
     for metadata in metadata_rows:
+        try:
+            scope = KnowledgeScope.parse(
+                metadata.get("knowledge_scope"), legacy_global=True
+            )
+        except KnowledgeScopeError as exc:
+            raise RetrievalError(str(exc)) from exc
+        # Eligibility must precede body reads, indexing, scoring, and model use.
+        if not scope.eligible_for(project_id):
+            continue
         try:
             revision = references.read_reference(
                 identity_dir,
@@ -266,7 +276,7 @@ def _reference_candidates(
             "summary": revision["summary"],
             "source_url": revision["source_url"],
             "revision_id": revision["revision_id"],
-            "knowledge_scope": {"kind": "global"},
+            "knowledge_scope": scope.to_dict(),
             "trust": "untrusted_reference",
             "snippet": _snippet(revision["text"], terms),
             "locator": revision["evidence_locator"],
