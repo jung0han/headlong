@@ -13,6 +13,7 @@ from typing import Any
 
 from headlong_web import envfile
 from headlong_web.assistant import AssistantError, PersonalAssistant
+from headlong_web.codex_scheduler import HEALTH_SCHEMA as SCHEDULER_HEALTH_SCHEMA
 from headlong_web.discovery import IdentityInfo
 
 
@@ -55,9 +56,10 @@ def run_bridge(
         try:
             if bridge == "codex":
                 assert active_root is not None and archived_root is not None
-                result = assistant.process_codex_once(active_root, archived_root)
-                degraded = any(
-                    section.get("status") != "ok" for section in result.values()
+                result = process_codex_cycle(assistant, active_root, archived_root)
+                degraded = result.get("status") == "degraded" or any(
+                    result.get(section, {}).get("status") != "ok"
+                    for section in ("collection", "analysis")
                 )
             else:
                 result = assistant.observe_web_once()
@@ -103,12 +105,14 @@ def public_health(root: Path, identity: IdentityInfo) -> dict[str, Any]:
     )
     cursors = _codex_cursors(state / "cursors" / "codex")
     codex_runtime = _runtime_marker(state, "codex")
+    codex_scheduling = _codex_scheduling(state / "source-health" / "codex-scheduling.json")
     web_runtime = _runtime_marker(state, "web")
     web_sources = _web_source_health(state / "source-health")
     storage = _storage_health(state)
     sources = {
         "codex": {
             "runtime": codex_runtime,
+            "scheduling": codex_scheduling,
             "cursor_count": cursors["total"],
             "cursors": cursors["items"],
             "truncated": cursors["truncated"],
@@ -123,6 +127,7 @@ def public_health(root: Path, identity: IdentityInfo) -> dict[str, Any]:
     states = [
         model.get("status"),
         codex_runtime.get("status"),
+        codex_scheduling.get("status"),
         web_runtime.get("status"),
     ]
     if storage["status"] != "ok" or "error" in states:
@@ -139,6 +144,19 @@ def public_health(root: Path, identity: IdentityInfo) -> dict[str, Any]:
         "sources": sources,
         "storage": storage,
     }
+
+
+def process_codex_cycle(
+    assistant: PersonalAssistant,
+    active_root: Path,
+    archived_root: Path,
+    *,
+    capacity: int | None = None,
+) -> dict[str, Any]:
+    """Public one-cycle runtime seam used by services and product tests."""
+    return assistant.schedule_codex_once(
+        active_root, archived_root, capacity=capacity
+    )
 
 
 def _install_signal_handlers(stop_event: threading.Event) -> None:
@@ -190,6 +208,48 @@ def _runtime_marker(state: Path, bridge: str) -> dict[str, Any]:
         "last_success_at": _timestamp(value.get("last_success_at")),
         "current_error": _code(value.get("current_error")),
     }
+
+
+def _codex_scheduling(path: Path) -> dict[str, Any]:
+    value = _read_object(path)
+    if value.get("schema") != SCHEDULER_HEALTH_SCHEMA:
+        return {
+            "status": "unknown",
+            "backlog_size": 0,
+            "failures": 0,
+            **{
+                lane: {
+                    "backlog": 0,
+                    "failures": 0,
+                    "last_progress_at": None,
+                }
+                for lane in (
+                    "active_collection",
+                    "newly_eligible_analysis",
+                    "historical_backfill",
+                )
+            },
+        }
+    result: dict[str, Any] = {
+        "status": _choice(value.get("status"), {"ok", "degraded"}, "unknown"),
+        "updated_at": _timestamp(value.get("updated_at")),
+        "last_progress_at": _timestamp(value.get("last_progress_at")),
+        "backlog_size": _nonnegative_int(value.get("backlog_size")),
+        "failures": _nonnegative_int(value.get("failures")),
+    }
+    for lane in (
+        "active_collection",
+        "newly_eligible_analysis",
+        "historical_backfill",
+    ):
+        item = value.get(lane)
+        item = item if isinstance(item, dict) else {}
+        result[lane] = {
+            "backlog": _nonnegative_int(item.get("backlog")),
+            "failures": _nonnegative_int(item.get("failures")),
+            "last_progress_at": _timestamp(item.get("last_progress_at")),
+        }
+    return result
 
 
 def _model_route(path: Path, secrets: set[str]) -> dict[str, Any]:
