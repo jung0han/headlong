@@ -1075,7 +1075,12 @@ class PersonalAssistant:
             raise AssistantError(str(exc)) from exc
 
     def report_memory_issue(
-        self, memory_event_id: str, classification: str, description: str
+        self,
+        memory_event_id: str,
+        classification: str,
+        description: str,
+        *,
+        downstream_event_id: str | None = None,
     ) -> dict[str, Any]:
         """Record observed memory harm or lesser quality feedback."""
         with self._state_lock():
@@ -1086,9 +1091,26 @@ class PersonalAssistant:
             )
             if target is None:
                 raise AssistantError(f"Active Memory not found: {memory_event_id}")
+            downstream = None
+            if downstream_event_id is not None:
+                downstream = next(
+                    (
+                        event
+                        for event in events
+                        if event.get("event_id") == downstream_event_id
+                    ),
+                    None,
+                )
+                if downstream is None:
+                    raise AssistantError(
+                        f"Downstream proposal or action event not found: {downstream_event_id}"
+                    )
             try:
                 event = memory_failures.issue_event(
-                    target, classification, description
+                    target,
+                    classification,
+                    description,
+                    downstream_event=downstream,
                 )
                 self._append_event(event)
                 if event["record_kind"] == "memory_failure":

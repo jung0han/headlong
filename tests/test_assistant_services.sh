@@ -86,7 +86,7 @@ check "Observer thinker has filesystem and privilege isolation" \
 check "Observer thinker cannot reach archive boundary socket" \
     grep -q '^InaccessiblePaths=.*/run/headlong-archive' "$REPO/deploy/headlong-thinkers@.service"
 check "archive boundary is allowlisted and separately hardened" \
-    bash -c 'grep -q "^RestrictAddressFamilies=AF_UNIX" "$1" && grep -q "^PrivateNetwork=true" "$1" && grep -q "^CapabilityBoundingSet=$" "$1" && ! grep -q "assistant-service.sh" "$1"' \
+    bash -c 'grep -q "^RestrictAddressFamilies=AF_UNIX" "$1" && grep -q "^PrivateNetwork=true" "$1" && grep -q "^CapabilityBoundingSet=$" "$1" && grep -q "^ReadWritePaths=@CODEX_HOME@ @SHELLM_HOME@/app/.assistant-authority$" "$1" && ! grep -q "assistant-service.sh" "$1"' \
         _ "$REPO/deploy/headlong-archive.service"
 check "web and bridges cannot directly mutate configured Codex state" \
     bash -c 'grep -q "^ReadOnlyPaths=@CODEX_HOME@$" "$1" && grep -q "^ReadOnlyPaths=@CODEX_HOME@$" "$2" && grep -q "^ReadOnlyPaths=@CODEX_HOME@$" "$3"' \
@@ -147,8 +147,33 @@ check "setup installs the assistant failure alert unit" \
     grep -q 'headlong-assistant-alert@' "$REPO/deploy/setup.sh"
 check "setup enables the archive boundary before web" \
     grep -q 'enable --now headlong-archive headlong-web' "$REPO/deploy/setup.sh"
+check "setup creates the archive result journal allowlist" \
+    grep -q '"$CODEX_HOME" "$APP_DIR/.assistant-authority"' "$REPO/deploy/setup.sh"
 check "update restarts the archive boundary" \
     grep -q 'try-restart headlong-archive.service' "$REPO/deploy/update.sh"
+check "update preserves the archive result journal allowlist" \
+    grep -q '"$CODEX_HOME" "$APP_DIR/.assistant-authority"' "$REPO/deploy/update.sh"
+
+LEGACY_HOME="$WORK/legacy-user"
+COPIED_BIN="$WORK/copied-bin"
+RECORDED_APP="$WORK/recorded-app"
+mkdir -p "$LEGACY_HOME/.shellm" "$COPIED_BIN" "$RECORDED_APP/web"
+printf '%s\n' "$RECORDED_APP" >"$LEGACY_HOME/.shellm/app_dir"
+cp "$REPO/tools/headlong-archive-boundary" "$COPIED_BIN/"
+cat >"$COPIED_BIN/uv" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >"$WRAPPER_RECORD"
+EOF
+chmod +x "$COPIED_BIN/headlong-archive-boundary" "$COPIED_BIN/uv"
+if HOME="$LEGACY_HOME" PATH="$COPIED_BIN:$PATH" WRAPPER_RECORD="$WORK/wrapper-record" \
+    env -u HEADLONG_HOME -u SHELLM_HOME \
+    "$COPIED_BIN/headlong-archive-boundary" --help >/dev/null 2>&1 \
+    && grep -q "^run --project $RECORDED_APP/web headlong-archive-boundary --help$" \
+        "$WORK/wrapper-record"; then
+    ok "copied archive boundary falls back to the legacy-only state home"
+else
+    bad "copied archive boundary falls back to the legacy-only state home"
+fi
 check "update restarts only active source bridge instances" \
     grep -q "try-restart 'headlong-assistant-codex@\*.service'" "$REPO/deploy/update.sh"
 check "assistant uninstall removes units without deleting identity state" \

@@ -363,7 +363,7 @@ def test_missing_result_after_process_restart_is_observable_and_retryable(
     assert interrupted["execution_error"]["code"] == "result_missing"
     assert retry_adapter.calls == [("archive", SESSION_ID)]
     assert recovered["execution_state"] == "already_done"
-    assert recovered["execution_attempts"] == 2
+    assert recovered["execution_attempts"] == 1
 
 
 def test_cli_exposes_direct_archive_and_unarchive_with_separate_execution_state(tmp_path: Path, capsys):

@@ -119,6 +119,7 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
     )
     report_failure.add_argument("--description", required=True)
+    report_failure.add_argument("--downstream-event-id")
 
     archive_candidate = commands.add_parser(
         "archive-candidate", help="inspect and review Codex Archive Candidates"
@@ -346,6 +347,7 @@ def run(
                     args.memory_event_id,
                     args.classification,
                     args.description,
+                    downstream_event_id=args.downstream_event_id,
                 )
         elif args.command == "archive-candidate":
             if args.archive_candidate_command == "list":

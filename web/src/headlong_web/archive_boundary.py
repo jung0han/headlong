@@ -25,6 +25,11 @@ _REQUEST_FIELDS = {
     "operation",
     "session_id",
 }
+DEFAULT_CLIENT_TIMEOUT = 75.0
+
+
+class ArchiveTransportLost(OSError):
+    """The request was sent but its mutation outcome was not received."""
 
 
 class ArchiveBoundaryClient:
@@ -35,7 +40,7 @@ class ArchiveBoundaryClient:
         identity_id: str,
         *,
         socket_path: Path | None = None,
-        timeout: float = 30.0,
+        timeout: float = DEFAULT_CLIENT_TIMEOUT,
     ):
         self.identity_id = identity_id
         self.socket_path = socket_path or Path(
@@ -80,6 +85,15 @@ class ArchiveBoundaryClient:
                     else None
                 ),
             )
+        except ArchiveTransportLost:
+            return archive_execution.AdapterResult(
+                "indeterminate",
+                error_code="archive_boundary_transport_lost",
+                message=(
+                    "The archive request was sent but its durable outcome was not "
+                    "received; retry to reconcile the same signed attempt."
+                ),
+            )
         except (OSError, TimeoutError, socket.timeout):
             return archive_execution.AdapterResult(
                 "failed",
@@ -102,7 +116,9 @@ def handle_request(
 ) -> dict[str, Any]:
     """Verify signed authority independently, then invoke the fixed adapter."""
     try:
-        operation, session_id = _authorized_request(root, request)
+        operation, session_id, journal, attempt, durable = _authorized_request(
+            root, request
+        )
     except (
         ValueError,
         authority.AuthorityJournalError,
@@ -115,18 +131,30 @@ def handle_request(
             message="Archive request did not match a signed active authorization.",
         )
         return _response(result)
-    try:
-        result = executor.execute(operation, session_id)
-    except (OSError, RuntimeError):
-        result = archive_execution.AdapterResult(
-            "failed",
-            error_code="archive_executor_failed",
-            message="The fixed Codex archive executor failed; session state may be unchanged.",
-        )
+    if durable is not None:
+        result = archive_execution.adapter_result(durable)
+    else:
+        try:
+            result = executor.execute(operation, session_id)
+        except (OSError, RuntimeError):
+            result = archive_execution.AdapterResult(
+                "failed",
+                error_code="archive_executor_failed",
+                message="The fixed Codex archive executor failed; session state may be unchanged.",
+            )
+        journal.append(archive_execution.result_event(attempt, result))
     return _response(result)
 
 
-def _authorized_request(root: Path, request: Any) -> tuple[str, str]:
+def _authorized_request(
+    root: Path, request: Any
+) -> tuple[
+    str,
+    str,
+    authority.AuthorityJournal,
+    dict[str, Any],
+    dict[str, Any] | None,
+]:
     if not isinstance(request, dict) or set(request) != _REQUEST_FIELDS:
         raise ValueError("invalid request fields")
     if request.get("schema") != REQUEST_SCHEMA:
@@ -139,7 +167,8 @@ def _authorized_request(root: Path, request: Any) -> tuple[str, str]:
     authorization_id = archive_execution._uuid(
         request.get("authorization_event_id"), "authorization event id"
     )
-    events = authority.AuthorityJournal(root, identity_id).read()
+    journal = authority.AuthorityJournal(root, identity_id)
+    events = journal.read()
     authorization = next(
         (event for event in events if event.get("event_id") == authorization_id), None
     )
@@ -161,8 +190,7 @@ def _authorized_request(root: Path, request: Any) -> tuple[str, str]:
         )
         if latest_directive is None or latest_directive.get("event_id") != authorization_id:
             raise ValueError("directive is no longer active")
-        return operation, session_id
-    if (
+    elif (
         operation != "archive"
         or authorization.get("archive_candidate_review_schema")
         != archive_candidates.REVIEW_SCHEMA
@@ -171,12 +199,34 @@ def _authorized_request(root: Path, request: Any) -> tuple[str, str]:
         or authorization.get("session_id") != session_id
     ):
         raise ValueError("candidate authorization mismatch")
-    candidate = archive_candidates.find_candidate(
-        events, str(authorization.get("candidate_id"))
+    else:
+        candidate = archive_candidates.find_candidate(
+            events, str(authorization.get("candidate_id"))
+        )
+        if candidate is None or candidate.get("review_event_id") != authorization_id:
+            raise ValueError("candidate authorization is not current")
+
+    attempts = [
+        archive_execution._attempt(event)
+        for event in events
+        if event.get("archive_attempt_schema") == archive_execution.ATTEMPT_SCHEMA
+        and event.get("authorization_event_id") == authorization_id
+        and event.get("operation") == operation
+        and event.get("session_id") == session_id
+    ]
+    if not attempts:
+        raise ValueError("signed archive attempt not found")
+    attempt = attempts[-1]
+    durable = next(
+        (
+            archive_execution._result(event)
+            for event in reversed(events)
+            if event.get("archive_result_schema") == archive_execution.RESULT_SCHEMA
+            and event.get("attempt_id") == attempt["event_id"]
+        ),
+        None,
     )
-    if candidate is None or candidate.get("review_event_id") != authorization_id:
-        raise ValueError("candidate authorization is not current")
-    return operation, session_id
+    return operation, session_id, journal, attempt, durable
 
 
 def _response(result: archive_execution.AdapterResult) -> dict[str, Any]:
@@ -203,8 +253,11 @@ def _exchange(path: Path, payload: bytes, timeout: float) -> bytes:
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
         client.settimeout(timeout)
         client.connect(str(path))
-        client.sendall(payload + b"\n")
-        data = _recv_line(client)
+        try:
+            client.sendall(payload + b"\n")
+            data = _recv_line(client)
+        except (OSError, TimeoutError, socket.timeout) as exc:
+            raise ArchiveTransportLost from exc
     return data
 
 
@@ -224,7 +277,13 @@ def _recv_line(connection: socket.socket) -> bytes:
     return b"".join(chunks).split(b"\n", 1)[0]
 
 
-def serve(root: Path, socket_path: Path, *, executor=None) -> None:
+def serve(
+    root: Path,
+    socket_path: Path,
+    *,
+    executor=None,
+    max_requests: int | None = None,
+) -> None:
     socket_path.parent.mkdir(parents=True, exist_ok=True)
     socket_path.unlink(missing_ok=True)
     adapter = executor or archive_execution.CodexArchiveAdapter()
@@ -232,7 +291,8 @@ def serve(root: Path, socket_path: Path, *, executor=None) -> None:
         server.bind(str(socket_path))
         os.chmod(socket_path, 0o600)
         server.listen(16)
-        while True:
+        handled = 0
+        while max_requests is None or handled < max_requests:
             connection, _address = server.accept()
             with connection:
                 try:
@@ -246,9 +306,14 @@ def serve(root: Path, socket_path: Path, *, executor=None) -> None:
                             message="Archive request was not valid.",
                         )
                     )
-                connection.sendall(
-                    json.dumps(response, separators=(",", ":")).encode() + b"\n"
-                )
+                try:
+                    connection.sendall(
+                        json.dumps(response, separators=(",", ":")).encode()
+                        + b"\n"
+                    )
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    pass
+            handled += 1
 
 
 def main() -> None:

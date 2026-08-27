@@ -36,7 +36,9 @@ tools live in [bin/](../bin/).
   capture, Structured Model Results, Archive Candidate review, and authorized
   archive execution. `memory-failure report/list/quality/health` records the three
   domain Memory Failure classes while retaining duplicate/wording feedback as
-  quality observations. `native-memory rebuild/restore` recovers the native
+  quality observations. A `behavior_affecting` report also requires
+  `--downstream-event-id` for a concrete proposal/action event with evidence.
+  `native-memory rebuild/restore` recovers the native
   Markdown store from its Activity Ledger history.
 - `headlong-archive-boundary` serves the authenticated, archive-only Unix
   socket used by production assistant routes; it exposes no general command
