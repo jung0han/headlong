@@ -41,6 +41,33 @@ class ActivityLedger:
         # rare equal timestamp without making projections move on later reads.
         return sorted(combined, key=_ledger_time)
 
+    def recovery_events(self) -> list[dict[str, Any]]:
+        """Read the complete ledger without the viewer's malformed-line tolerance."""
+        traj_dir = discovery.find_root_traj_dir(self.identity)
+        if traj_dir is None:
+            raise AssistantServiceError("Observer Identity has no root trajectory")
+        public: list[dict[str, Any]] = []
+        try:
+            with (traj_dir / "trajectory.jsonl").open(encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    event = json.loads(line)
+                    if not isinstance(event, dict):
+                        raise ValueError("ledger row is not an object")
+                    if event.get("type") not in authority.PROTECTED_EVENT_TYPES:
+                        public.append(event)
+            protected = self.authority.read()
+        except (
+            OSError,
+            UnicodeError,
+            json.JSONDecodeError,
+            ValueError,
+            authority.AuthorityJournalError,
+        ) as exc:
+            raise AssistantServiceError("Activity Ledger is corrupt") from exc
+        return sorted([*public, *protected], key=_ledger_time)
+
     def append(self, event: dict[str, Any]) -> None:
         if "ts" not in event:
             event = {

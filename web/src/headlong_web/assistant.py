@@ -1020,11 +1020,19 @@ class PersonalAssistant:
             }
             for memory_id in sorted(current.keys() - previous.keys()):
                 replacement = current[memory_id]
+                prior_events = [
+                    event
+                    for event in ledger_events
+                    if event.get("source_kind") == "headlong_memory"
+                    and event.get("memory_id") == memory_id
+                ]
+                supersedes = [prior_events[-1]["event_id"]] if prior_events else []
+                transition = f":{supersedes[0]}" if supersedes else ""
                 event_id = str(
                     uuid.uuid5(
                         _EVENT_NAMESPACE,
                         f"{native_memory.MUTATION_SCHEMA}:added:{memory_id}:"
-                        f"{native_memory.digest(replacement)}",
+                        f"{native_memory.digest(replacement)}{transition}",
                     )
                 )
                 event = activity_event(
@@ -1039,6 +1047,7 @@ class PersonalAssistant:
                     evidence_locators=replacement["evidence_locators"],
                     title=f"Native {replacement['memory_type']} added",
                     content=replacement["content"],
+                    supersedes_event_ids=supersedes,
                     details={
                         "mutation_schema": native_memory.MUTATION_SCHEMA,
                         "memory_id": memory_id,
@@ -1067,7 +1076,9 @@ class PersonalAssistant:
                     uuid.uuid5(
                         _EVENT_NAMESPACE,
                         f"{native_memory.MUTATION_SCHEMA}:edited:{memory_id}:"
-                        f"{native_memory.digest(prior)}:{native_memory.digest(replacement)}",
+                        f"{native_memory.digest(prior)}:"
+                        f"{native_memory.digest(replacement)}:"
+                        f"{supersedes[0] if supersedes else ''}",
                     )
                 )
                 event = activity_event(
@@ -1108,7 +1119,8 @@ class PersonalAssistant:
                     uuid.uuid5(
                         _EVENT_NAMESPACE,
                         f"{native_memory.MUTATION_SCHEMA}:forgotten:{memory_id}:"
-                        f"{native_memory.digest(prior)}",
+                        f"{native_memory.digest(prior)}:"
+                        f"{supersedes[0] if supersedes else ''}",
                     )
                 )
                 event = activity_event(
@@ -1136,8 +1148,89 @@ class PersonalAssistant:
                     self._append_event(event)
                     ledger_ids.add(event_id)
                     result["forgotten"] += 1
+            if current != previous:
+                try:
+                    native_memory.invalidate_retrieval(self.identity.path)
+                except native_memory.NativeMemoryError as exc:
+                    raise AssistantError(str(exc)) from exc
             self._write_state_json(snapshot_path, native_memory.snapshot(current))
         return result
+
+    def rebuild_native_memory(self) -> dict[str, int]:
+        """Reconstruct the native Markdown store from Activity Ledger history."""
+        snapshot_path = self.state_dir / "native-memory" / "snapshot.json"
+        with self._state_lock():
+            try:
+                current, tombstoned = native_memory.replay(
+                    self._native_memory_ledger_events()
+                )
+                native_memory.rebuild_store(self.identity.path / "memories", current)
+                native_memory.invalidate_retrieval(self.identity.path)
+                self._write_state_json(snapshot_path, native_memory.snapshot(current))
+            except native_memory.NativeMemoryError as exc:
+                raise AssistantError(str(exc)) from exc
+        return {"active": len(current), "tombstoned": tombstoned}
+
+    def restore_native_memory(self, selector: str) -> dict[str, str]:
+        """Restore one forgotten native memory through its stable identity."""
+        snapshot_path = self.state_dir / "native-memory" / "snapshot.json"
+        with self._state_lock():
+            events = self._native_memory_ledger_events()
+            try:
+                current, tombstones, last_events = native_memory.replay_details(events)
+                matches = [
+                    memory_id
+                    for memory_id in sorted(current.keys() | tombstones.keys())
+                    if memory_id == selector or memory_id.startswith(selector)
+                ]
+                if len(matches) != 1:
+                    detail = "not found" if not matches else "ambiguous"
+                    raise native_memory.NativeMemoryError(
+                        f"native memory {detail}: {selector}"
+                    )
+                memory_id = matches[0]
+                if memory_id in tombstones:
+                    replacement = tombstones[memory_id]
+                    supersedes = last_events[memory_id]
+                    event_id = str(
+                        uuid.uuid5(
+                            _EVENT_NAMESPACE,
+                            f"{native_memory.MUTATION_SCHEMA}:restored:{memory_id}:"
+                            f"{supersedes}:{native_memory.digest(replacement)}",
+                        )
+                    )
+                    event = activity_event(
+                        event_type="native-memory-restored",
+                        event_id=event_id,
+                        source_kind="headlong_memory",
+                        source_identity=memory_id,
+                        knowledge_scope=replacement["knowledge_scope"],
+                        evidence_kind="user_statement",
+                        verification="observed",
+                        authority="active",
+                        evidence_locators=replacement["evidence_locators"],
+                        title=f"Native {replacement['memory_type']} restored",
+                        content=replacement["content"],
+                        supersedes_event_ids=[supersedes],
+                        details={
+                            "mutation_schema": native_memory.MUTATION_SCHEMA,
+                            "memory_id": memory_id,
+                            "memory_type": replacement["memory_type"],
+                            "prior_value": None,
+                            "replacement_value": replacement,
+                            "restored_from_event_id": supersedes,
+                        },
+                    )
+                    self._append_event(event)
+                    current, tombstones, _last_events = native_memory.replay_details(
+                        [*events, event]
+                    )
+                native_memory.rebuild_store(self.identity.path / "memories", current)
+                native_memory.invalidate_retrieval(self.identity.path)
+                self._write_state_json(snapshot_path, native_memory.snapshot(current))
+            except native_memory.NativeMemoryError as exc:
+                raise AssistantError(str(exc)) from exc
+        return {"memory_id": memory_id, "status": "active"}
 
     def response_context(
         self,
@@ -1766,6 +1859,12 @@ class PersonalAssistant:
     def _ledger_events(self) -> list[dict[str, Any]]:
         try:
             return self._ledger.events()
+        except assistant_services.AssistantServiceError as exc:
+            raise AssistantError(str(exc)) from exc
+
+    def _native_memory_ledger_events(self) -> list[dict[str, Any]]:
+        try:
+            return self._ledger.recovery_events()
         except assistant_services.AssistantServiceError as exc:
             raise AssistantError(str(exc)) from exc
 

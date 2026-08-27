@@ -586,6 +586,26 @@ def create_app(
             raise HTTPException(status_code=404, detail="Memory not found")
         return {"name": name, "content": memory_path.read_text(encoding="utf-8", errors="replace")}
 
+    @app.post("/api/identities/{identity_id}/memories/rebuild")
+    def identity_rebuild_native_memories(identity_id: str) -> dict:
+        _require_controls()
+        identity = _identity_or_404(root, identity_id)
+        try:
+            return assistant.PersonalAssistant(root, identity).rebuild_native_memory()
+        except assistant.AssistantError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.post("/api/identities/{identity_id}/memories/{memory_id}/restore")
+    def identity_restore_native_memory(identity_id: str, memory_id: str) -> dict:
+        _require_controls()
+        identity = _identity_or_404(root, identity_id)
+        try:
+            return assistant.PersonalAssistant(root, identity).restore_native_memory(
+                memory_id
+            )
+        except assistant.AssistantError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.get("/api/identities/{identity_id}/active-memories")
     def identity_active_memories(
         identity_id: str,
