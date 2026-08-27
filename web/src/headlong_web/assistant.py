@@ -1418,6 +1418,15 @@ class PersonalAssistant:
         self, active_root: Path, archived_root: Path
     ) -> dict[str, Any]:
         """Collect complete records appended to eligible active session streams."""
+        return self._follow_codex_selected(active_root, archived_root, None)
+
+    def _follow_codex_selected(
+        self,
+        active_root: Path,
+        archived_root: Path,
+        session_ids: set[str] | tuple[str, ...] | list[str] | None,
+    ) -> dict[str, Any]:
+        """Collect selected sources for the focused Codex scheduler."""
         roots = {"active": active_root.resolve(), "archived": archived_root.resolve()}
         result: dict[str, Any] = {
             "appended": 0,
@@ -1434,6 +1443,12 @@ class PersonalAssistant:
             projects = self.projects()
             ledger_ids = self._ledger_event_ids()
             sources, discovery_errors = discover_sources(roots)
+            if session_ids is not None:
+                order = {session_id: index for index, session_id in enumerate(session_ids)}
+                sources = sorted(
+                    (source for source in sources if source.id in order),
+                    key=lambda source: order[source.id],
+                )
             result["discovered"] = len(sources) + len(discovery_errors)
             result["errors"].extend(discovery_errors)
             if discovery_errors:
@@ -1493,17 +1508,51 @@ class PersonalAssistant:
 
     def process_codex_once(
         self, active_root: Path, archived_root: Path
-    ) -> dict[str, dict[str, Any]]:
-        """Collect sources, run due analysis, and audit native memory."""
-        collection = self.follow_codex_once(active_root, archived_root)
-        analysis = self.analyze_codex_once(active_root, archived_root)
-        memory = self.capture_native_memory_mutations()
-        return {"collection": collection, "analysis": analysis, "memory": memory}
+    ) -> dict[str, Any]:
+        """Run one compatibility-sized source cycle and audit native memory."""
+        from headlong_web.codex_scheduler import (
+            COMPATIBILITY_BATCH_CAPACITY,
+            CodexScheduler,
+        )
+
+        result = CodexScheduler(
+            self,
+            active_root,
+            archived_root,
+            capacity=COMPATIBILITY_BATCH_CAPACITY,
+        ).run_once()
+        result["memory"] = self.capture_native_memory_mutations()
+        return result
+
+    def schedule_codex_once(
+        self,
+        active_root: Path,
+        archived_root: Path,
+        *,
+        capacity: int | None = None,
+    ) -> dict[str, Any]:
+        """Run one bounded continuous-runtime cycle and audit native memory."""
+        from headlong_web.codex_scheduler import CodexScheduler
+
+        result = CodexScheduler(
+            self, active_root, archived_root, capacity=capacity
+        ).run_once()
+        result["memory"] = self.capture_native_memory_mutations()
+        return result
 
     def analyze_codex_once(
         self, active_root: Path, archived_root: Path
     ) -> dict[str, Any]:
         """Run deterministic inactivity/archival analysis for collected revisions."""
+        return self._analyze_codex_selected(active_root, archived_root, None)
+
+    def _analyze_codex_selected(
+        self,
+        active_root: Path,
+        archived_root: Path,
+        session_ids: set[str] | tuple[str, ...] | list[str] | None,
+    ) -> dict[str, Any]:
+        """Analyze selected sources for the focused Codex scheduler."""
         roots = {"active": active_root.resolve(), "archived": archived_root.resolve()}
         result: dict[str, Any] = {
             "discovered": 0,
@@ -1522,6 +1571,12 @@ class PersonalAssistant:
             projects = self.projects()
             ledger_ids = self._ledger_event_ids()
             sources, discovery_errors = discover_sources(roots)
+            if session_ids is not None:
+                order = {session_id: index for index, session_id in enumerate(session_ids)}
+                sources = sorted(
+                    (source for source in sources if source.id in order),
+                    key=lambda source: order[source.id],
+                )
             result["discovered"] = len(sources) + len(discovery_errors)
             result["errors"].extend(discovery_errors)
             for source in sources:

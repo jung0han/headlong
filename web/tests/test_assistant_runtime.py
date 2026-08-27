@@ -141,9 +141,16 @@ def test_bridge_loop_reuses_state_and_records_success(tmp_path: Path) -> None:
         state_dir = tmp_path / "assistant"
         calls = 0
 
-        def process_codex_once(self, active: Path, archived: Path) -> dict[str, Any]:
+        def schedule_codex_once(
+            self,
+            active: Path,
+            archived: Path,
+            *,
+            capacity: int | None = None,
+        ) -> dict[str, Any]:
             assert active == tmp_path / "sessions"
             assert archived == tmp_path / "archived"
+            assert capacity is None
             self.calls += 1
             stop.set()
             return {"collection": {"status": "ok"}, "analysis": {"status": "ok"}}
