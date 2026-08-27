@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 import uuid
 from dataclasses import dataclass
@@ -72,20 +71,6 @@ class CommandResult:
 
 class CommandExecutor(Protocol):
     def run(self, command: tuple[str, ...], *, timeout: float) -> CommandResult: ...
-
-
-class SubprocessCommandExecutor:
-    """Run only commands assembled by ``CodexArchiveAdapter``."""
-
-    def run(self, command: tuple[str, ...], *, timeout: float) -> CommandResult:
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-        return CommandResult(completed.returncode, completed.stdout, completed.stderr)
 
 
 class SandboxedCodexCommandExecutor:
@@ -175,12 +160,12 @@ class CodexArchiveAdapter:
     def __init__(
         self,
         *,
-        executor: CommandExecutor | None = None,
-        binary: str | None = None,
+        executor: CommandExecutor,
+        binary: str | None,
         timeout: float = 30.0,
     ):
-        self.executor = executor or SubprocessCommandExecutor()
-        self.binary = shutil.which("codex") if binary is None else binary
+        self.executor = executor
+        self.binary = binary
         self.timeout = timeout
         self._probe_result: AdapterResult | None = None
         self._probed = False
