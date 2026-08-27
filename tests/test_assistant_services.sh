@@ -83,6 +83,7 @@ actor_flags=$(bash -c '
     IDENTITY_NAME=observer MEM_DIR="$2/mem" SKILLS_DIR="$2/skills" \
       SKILLS_KERNEL_DIR="$2/kernel" TRAJ_DIR="$2/traj" TRAJ_ID=forbidden \
       HEADLONG_PROPOSAL_ONLY=1 LLM_PROVIDER=openai OPENAI_API_KEY=route-only \
+      SSL_CERT_FILE="$2/ca.pem" CURL_CA_BUNDLE="$2/ca.pem" \
       GITHUB_TOKEN=forbidden SLACK_TOKEN=forbidden \
       _build_shellm_flags "$2" "$2/run"
 ' _ "$REPO/thinkers/_lib/common.sh" "$WORK/actor")
@@ -95,6 +96,11 @@ if grep -qx 'OPENAI_API_KEY' <<<"$actor_flags"; then
     ok "proposal-only actor retains only its OpenAI-compatible route credential"
 else
     bad "proposal-only actor retains only its OpenAI-compatible route credential"
+fi
+if grep -qx 'SSL_CERT_FILE' <<<"$actor_flags" && grep -qx 'CURL_CA_BUNDLE' <<<"$actor_flags"; then
+    ok "proposal-only actor retains its pinned TLS trust paths"
+else
+    bad "proposal-only actor retains its pinned TLS trust paths"
 fi
 
 for unit in headlong-thinkers@.service headlong-assistant-codex@.service headlong-assistant-web@.service; do

@@ -360,6 +360,16 @@ _build_shellm_flags() {
             printf '%s\n' "--var" "$_route_var"
         fi
     done
+    # A private OpenAI-compatible route may use a pinned CA. The certificate
+    # itself lives inside the already-mounted Observer Identity; forward only
+    # its path so curl/OpenSSL in the container use the same trust decision as
+    # the host-side route probe. These variables contain no credential value.
+    for _tls_var in SSL_CERT_FILE CURL_CA_BUNDLE; do
+        if [[ -n "${!_tls_var:-}" ]]; then
+            export "${_tls_var?}"
+            printf '%s\n' "--var" "$_tls_var"
+        fi
+    done
     if [[ "${HEADLONG_PROPOSAL_ONLY:-0}" == "1" ]]; then
         [[ "${LLM_PROVIDER:-}" == "openai" ]] \
             || { printf 'proposal-only Observer requires LLM_PROVIDER=openai\n' >&2; return 1; }
