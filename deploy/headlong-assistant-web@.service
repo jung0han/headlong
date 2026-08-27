@@ -1,0 +1,21 @@
+# Continuous Registered Web Source bridge for one Observer Identity.
+
+[Unit]
+Description=headlong Web Source bridge for Observer Identity %i
+After=network-online.target
+Wants=network-online.target
+PartOf=headlong-assistant@%i.target
+
+[Service]
+Type=simple
+User=shellm
+WorkingDirectory=@SHELLM_HOME@/app
+Environment="PATH=@SHELLM_HOME@/.local/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=-/etc/headlong/assistant.env
+ExecStart=/bin/bash @SHELLM_HOME@/app/deploy/assistant-service.sh @SHELLM_HOME@/app %i web
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=30
+
+[Install]
+WantedBy=headlong-assistant@%i.target

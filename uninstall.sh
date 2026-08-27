@@ -150,6 +150,7 @@ PATTERNS=(
     'bash [^ ]*/thinkers/[^ /]+/step( |$)'
     'bash [^ ]*/bin/traj tail'
     'tail -n 0 -F [^ ]*trajectory\.jsonl'
+    '(uv run --project [^ ]+ |/\.venv/bin/)headlong-assistant .*run-(codex|web)-bridge( |$)'
 )
 DASH_PAT='(uv run --project [^ ]+ |/\.venv/bin/)(headlong|shellm|shelly)-web( |$)'
 _list_processes() {

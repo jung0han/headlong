@@ -104,6 +104,29 @@ else
 fi
 systemctl daemon-reload
 
+# Personal Assistant supervision reuses the existing per-identity thinker unit
+# and adds independently restartable Codex/Web bridges. Fresh installs often
+# have no identity yet, so installation is unconditional and activation is an
+# explicit opt-in once the Observer exists.
+echo "==> Installing Personal Assistant source-bridge units"
+for unit_tpl in headlong-assistant-codex@ headlong-assistant-web@; do
+    sed "s|@SHELLM_HOME@|$SHELLM_HOME|g" "$SCRIPT_DIR/${unit_tpl}.service" \
+        > "/etc/systemd/system/${unit_tpl}.service"
+done
+install -o root -g root -m 0644 "$SCRIPT_DIR/headlong-assistant@.target" \
+    /etc/systemd/system/headlong-assistant@.target
+systemctl daemon-reload
+if [[ -n "${HEADLONG_OBSERVER_IDENTITY:-}" ]]; then
+    observer="$HEADLONG_OBSERVER_IDENTITY"
+    [[ "$observer" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] \
+        || { echo "ERROR: invalid HEADLONG_OBSERVER_IDENTITY: $observer" >&2; exit 1; }
+    [[ -d "$APP_DIR/.identities/$observer" ]] \
+        || { echo "ERROR: Observer Identity does not exist: $observer" >&2; exit 1; }
+    systemctl enable --now "headlong-assistant@$observer.target"
+else
+    echo "    Units installed; set HEADLONG_OBSERVER_IDENTITY after creating the Observer to enable them."
+fi
+
 # Signal auditing: kernel-level attribution for process kills (see
 # deploy/audit-headlong-signals.rules — added after the 2026-08-12
 # unattributed dispatcher death). ausearch -k headlong-sig names the sender.

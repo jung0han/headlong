@@ -8,7 +8,7 @@ import os
 import sys
 from pathlib import Path
 
-from headlong_web import web_exploration
+from headlong_web import assistant_runtime, web_exploration
 from headlong_web.assistant import (
     AssistantError,
     EvidenceLocator,
@@ -93,6 +93,33 @@ def build_parser() -> argparse.ArgumentParser:
         "process-codex", help="collect Codex records and run due session analysis once"
     )
     _source_root_args(process)
+
+    run_codex = commands.add_parser(
+        "run-codex-bridge", help="continuously collect and analyze Codex Sessions"
+    )
+    _source_root_args(run_codex)
+    run_codex.add_argument(
+        "--interval-seconds",
+        type=float,
+        default=os.environ.get(
+            "HEADLONG_CODEX_BRIDGE_INTERVAL_SECONDS",
+            str(assistant_runtime.DEFAULT_CODEX_INTERVAL_SECONDS),
+        ),
+    )
+
+    run_web = commands.add_parser(
+        "run-web-bridge", help="continuously refresh Registered Web Sources"
+    )
+    run_web.add_argument(
+        "--interval-seconds",
+        type=float,
+        default=os.environ.get(
+            "HEADLONG_WEB_BRIDGE_INTERVAL_SECONDS",
+            str(assistant_runtime.DEFAULT_WEB_INTERVAL_SECONDS),
+        ),
+    )
+
+    commands.add_parser("status", help="show bounded Personal Assistant health")
 
     evidence = commands.add_parser("resolve-evidence", help="resolve a v1 Evidence Locator")
     evidence.add_argument("locator")
@@ -221,6 +248,24 @@ def run(argv: list[str] | None = None) -> int:
             result = assistant.process_codex_once(
                 args.sessions_root, args.archived_sessions_root
             )
+        elif args.command == "run-codex-bridge":
+            assistant_runtime.run_bridge(
+                assistant,
+                "codex",
+                interval_seconds=args.interval_seconds,
+                active_root=args.sessions_root,
+                archived_root=args.archived_sessions_root,
+            )
+            result = {"status": "stopped", "bridge": "codex"}
+        elif args.command == "run-web-bridge":
+            assistant_runtime.run_bridge(
+                assistant,
+                "web",
+                interval_seconds=args.interval_seconds,
+            )
+            result = {"status": "stopped", "bridge": "web"}
+        elif args.command == "status":
+            result = assistant_runtime.public_health(root, identity)
         else:
             locator = EvidenceLocator.decode(args.locator)
             raw = assistant.resolve_evidence(

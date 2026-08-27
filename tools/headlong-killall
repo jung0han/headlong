@@ -9,6 +9,7 @@ set -euo pipefail
 #   - llm API callers and their streaming curl children
 #   - thinkers dispatchers and thinker step scripts
 #   - traj tail followers and orphaned `tail -F .../trajectory.jsonl` feeders
+#   - continuously running Personal Assistant source bridges
 #   - per-run docker containers (name shellm-<pid>)
 #   - headlong-web dash (only with --web; it burns no tokens)
 #
@@ -47,6 +48,7 @@ PATTERNS=(
     'bash [^ ]*/thinkers/[^ /]+/step( |$)'
     'bash [^ ]*/bin/traj tail'
     'tail -n 0 -F [^ ]*trajectory\.jsonl'
+    '(uv run --project [^ ]+ |/\.venv/bin/)headlong-assistant .*run-(codex|web)-bridge( |$)'
 )
 if [[ "$KILL_WEB" -eq 1 ]]; then
     # The dash: `uv run --project <app>/web headlong-web ...` and the venv
