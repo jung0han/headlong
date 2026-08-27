@@ -22,7 +22,7 @@ IDENT="${2:?identity name required}"
 ACTION="${3:?action required (start|stop)}"
 
 cd "$APP_DIR"
-export PATH="$APP_DIR/bin:$PATH"
+export PATH="$APP_DIR/bin:$APP_DIR/tools:$PATH"
 
 # Same env layering as the web control plane's _ENV_WRAPPER: root .env
 # first (API keys, SHELLM_MODEL), then the identity's own .env so

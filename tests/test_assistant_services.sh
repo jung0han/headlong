@@ -75,6 +75,8 @@ check "Observer thinker has filesystem and privilege isolation" \
 check "proposal-only shell actor is not given trajectory authority" \
     bash -c 'grep -q "HEADLONG_PROPOSAL_ONLY" "$1" && grep -q "proposal-only Observer requires a container" "$2"' \
         _ "$REPO/thinkers/_lib/common.sh" "$REPO/thinkers/monolith/step"
+check "thinker service can reconcile the bundled roster" \
+    grep -q 'APP_DIR/bin:\$APP_DIR/tools' "$REPO/deploy/thinkers-service.sh"
 
 mkdir -p "$WORK/actor"/{mem,skills,kernel,traj,run}
 actor_flags=$(bash -c '
