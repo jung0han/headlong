@@ -47,7 +47,7 @@ class FakeArchiveAdapter:
             archive_execution.AdapterResult("succeeded"),
         ]
 
-    def execute(self, operation: str, session_id: str) -> archive_execution.AdapterResult:
+    def execute(self, operation: str, session_id: str, authorization_event_id: str) -> archive_execution.AdapterResult:
         self.calls.append((operation, session_id))
         return self.results.pop(0)
 

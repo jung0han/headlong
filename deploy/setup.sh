@@ -21,11 +21,17 @@ set -euo pipefail
 SHELLM_REPO="${SHELLM_REPO:-https://github.com/laude-institute/headlong.git}"
 SHELLM_BRANCH="${SHELLM_BRANCH:-main}"
 SHELLM_HOME="${SHELLM_HOME:-/opt/shellm}"
+CODEX_HOME="${CODEX_HOME:-$SHELLM_HOME/.codex}"
 SHELLM_USER="shellm"
 APP_DIR="$SHELLM_HOME/app"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 [[ "$(id -u)" -eq 0 ]] || { echo "Run as root (sudo bash deploy/setup.sh)" >&2; exit 1; }
+[[ "$CODEX_HOME" =~ ^/[A-Za-z0-9._/-]+$ \
+   && "$CODEX_HOME" != *"/../"* && "$CODEX_HOME" != */.. \
+   && "$CODEX_HOME" != *"/./"* && "$CODEX_HOME" != */. \
+   && "$CODEX_HOME" != *"//"* ]] \
+    || { echo "ERROR: CODEX_HOME must be a normalized absolute path" >&2; exit 1; }
 
 echo "==> Installing system packages"
 apt-get update -qq
@@ -82,17 +88,20 @@ ENV
 fi
 
 echo "==> Installing systemd service"
-sed "s|@SHELLM_HOME@|$SHELLM_HOME|g" "$SCRIPT_DIR/headlong-web.service" \
+install -d -o "$SHELLM_USER" -g "$SHELLM_USER" -m 0700 "$CODEX_HOME"
+sed -e "s|@SHELLM_HOME@|$SHELLM_HOME|g" -e "s|@CODEX_HOME@|$CODEX_HOME|g" "$SCRIPT_DIR/headlong-archive.service" \
+    > /etc/systemd/system/headlong-archive.service
+sed -e "s|@SHELLM_HOME@|$SHELLM_HOME|g" -e "s|@CODEX_HOME@|$CODEX_HOME|g" "$SCRIPT_DIR/headlong-web.service" \
     > /etc/systemd/system/headlong-web.service
 systemctl daemon-reload
-systemctl enable --now headlong-web
+systemctl enable --now headlong-archive headlong-web
 
 # Per-identity thinker units: the dash starts/stops dispatchers through
 # headlong-thinkers@<identity>.service (via the sudo wrapper) so they get
 # their own cgroup instead of living inside headlong-web's.
 echo "==> Installing per-identity thinkers unit + control wrapper"
 for unit_tpl in headlong-thinkers@ headlong-thinkers-alert@; do
-    sed "s|@SHELLM_HOME@|$SHELLM_HOME|g" "$SCRIPT_DIR/${unit_tpl}.service" \
+    sed -e "s|@SHELLM_HOME@|$SHELLM_HOME|g" -e "s|@CODEX_HOME@|$CODEX_HOME|g" "$SCRIPT_DIR/${unit_tpl}.service" \
         > "/etc/systemd/system/${unit_tpl}.service"
 done
 install -o root -g root -m 0755 "$SCRIPT_DIR/headlong-thinkersctl" /usr/local/bin/headlong-thinkersctl
@@ -110,7 +119,7 @@ systemctl daemon-reload
 # explicit opt-in once the Observer exists.
 echo "==> Installing Personal Assistant source-bridge units"
 for unit_tpl in headlong-assistant-codex@ headlong-assistant-web@ headlong-assistant-alert@; do
-    sed "s|@SHELLM_HOME@|$SHELLM_HOME|g" "$SCRIPT_DIR/${unit_tpl}.service" \
+    sed -e "s|@SHELLM_HOME@|$SHELLM_HOME|g" -e "s|@CODEX_HOME@|$CODEX_HOME|g" "$SCRIPT_DIR/${unit_tpl}.service" \
         > "/etc/systemd/system/${unit_tpl}.service"
 done
 install -o root -g root -m 0644 "$SCRIPT_DIR/headlong-assistant@.target" \

@@ -26,15 +26,21 @@ tools live in [bin/](../bin/).
   sites are never added to recurring registrations. `archive-candidate
   list/show/review` exposes evidence-backed Codex completion claims; `review`
   accepts one or more candidate ids for individual or batch review. Acceptance
-  records signed user authority and invokes the narrow, capability-probed Codex
-  archive adapter once per stable session identity. `archive-session archive`,
+  records signed user authority and invokes the hardened, independently
+  verified Codex archive boundary once per stable session identity.
+  `archive-session archive`,
   `archive-session unarchive`, and `archive-session retry-candidate` expose the
   direct directive, recovery, and authorized retry paths without editing Codex
   Session files. `status` returns bounded operational health for current
   collection, newly eligible analysis, Historical Backfill, native-memory
   capture, Structured Model Results, Archive Candidate review, and authorized
-  archive execution. `native-memory rebuild/restore` recovers the native
+  archive execution. `memory-failure report/list/quality/health` records the three
+  domain Memory Failure classes while retaining duplicate/wording feedback as
+  quality observations. `native-memory rebuild/restore` recovers the native
   Markdown store from its Activity Ledger history.
+- `headlong-archive-boundary` serves the authenticated, archive-only Unix
+  socket used by production assistant routes; it exposes no general command
+  execution interface.
 - `shellm-docker-broker` is the host-side policy server for brokered
   Docker. It is never present in the mind's environment.
 - `shellm-explore` visualizes run trees, `pr-committee` runs multi-model

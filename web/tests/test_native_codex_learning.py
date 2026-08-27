@@ -323,3 +323,18 @@ def test_current_codex_observation_wakes_native_learning_within_five_minutes(
     )
     assert shown.status_code == 200
     assert "preserves autonomous native HeadLong learning" in shown.json()["content"]
+
+    captured = assistant.capture_native_memory_mutations()
+    assert captured["added"] == 1
+    mutation = next(
+        event
+        for event in events_after_capture(identity)
+        if event.get("type") == "native-memory-added"
+    )
+    assert mutation["knowledge_scope"] == observation["knowledge_scope"]
+    assert mutation["evidence_locators"] == observation["evidence_locators"]
+
+
+def events_after_capture(identity: Path) -> list[dict]:
+    trajectory = identity / "trajectories" / "aaaaaaaa-root" / "trajectory.jsonl"
+    return [json.loads(line) for line in trajectory.read_text().splitlines()]

@@ -15,6 +15,8 @@ check() { local label="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$label"; el
 APP="$WORK/app"
 mkdir -p "$APP/deploy" "$APP/tools" "$APP/.identities/observer" "$WORK/systemd"
 cp "$REPO/deploy/assistant-service.sh" "$APP/deploy/"
+cp "$REPO/tools/headlong-archive-boundary" "$APP/tools/"
+chmod +x "$APP/tools/headlong-archive-boundary"
 cat >"$APP/.env" <<'EOF'
 LLM_PROVIDER=openai
 LLM_API_URL=https://root.invalid/v1/chat/completions
@@ -81,6 +83,16 @@ check "Observer thinker cannot see the authority journal" \
 check "Observer thinker has filesystem and privilege isolation" \
     bash -c 'grep -q "^ProtectSystem=strict" "$1" && grep -q "^NoNewPrivileges=true" "$1" && grep -q "^PrivateDevices=true" "$1"' \
         _ "$REPO/deploy/headlong-thinkers@.service"
+check "Observer thinker cannot reach archive boundary socket" \
+    grep -q '^InaccessiblePaths=.*/run/headlong-archive' "$REPO/deploy/headlong-thinkers@.service"
+check "archive boundary is allowlisted and separately hardened" \
+    bash -c 'grep -q "^RestrictAddressFamilies=AF_UNIX" "$1" && grep -q "^PrivateNetwork=true" "$1" && grep -q "^CapabilityBoundingSet=$" "$1" && ! grep -q "assistant-service.sh" "$1"' \
+        _ "$REPO/deploy/headlong-archive.service"
+check "web and bridges cannot directly mutate configured Codex state" \
+    bash -c 'grep -q "^ReadOnlyPaths=@CODEX_HOME@$" "$1" && grep -q "^ReadOnlyPaths=@CODEX_HOME@$" "$2" && grep -q "^ReadOnlyPaths=@CODEX_HOME@$" "$3"' \
+        _ "$REPO/deploy/headlong-web.service" \
+        "$REPO/deploy/headlong-assistant-codex@.service" \
+        "$REPO/deploy/headlong-assistant-web@.service"
 check "proposal-only shell actor keeps identity-local native learning authority" \
     bash -c 'grep -q "HEADLONG_PROPOSAL_ONLY" "$1" && grep -q "proposal-only Observer requires a container" "$2"' \
         _ "$REPO/thinkers/_lib/common.sh" "$REPO/thinkers/monolith/step"
@@ -115,8 +127,8 @@ else
     bad "proposal-only actor retains its pinned TLS trust paths"
 fi
 
-for unit in headlong-thinkers@.service headlong-assistant-codex@.service headlong-assistant-web@.service headlong-assistant-alert@.service; do
-    sed "s|@SHELLM_HOME@|$WORK/deploy-home|g" "$REPO/deploy/$unit" >"$WORK/systemd/$unit"
+for unit in headlong-archive.service headlong-thinkers@.service headlong-assistant-codex@.service headlong-assistant-web@.service headlong-assistant-alert@.service; do
+    sed -e "s|@SHELLM_HOME@|$WORK/deploy-home|g" -e "s|@CODEX_HOME@|$WORK/codex-home|g" "$REPO/deploy/$unit" >"$WORK/systemd/$unit"
 done
 cp "$REPO/deploy/headlong-assistant@.target" "$WORK/systemd/"
 if command -v systemd-analyze >/dev/null 2>&1; then
@@ -133,10 +145,14 @@ check "setup installs source units and target" \
     grep -q 'headlong-assistant-codex@ headlong-assistant-web@' "$REPO/deploy/setup.sh"
 check "setup installs the assistant failure alert unit" \
     grep -q 'headlong-assistant-alert@' "$REPO/deploy/setup.sh"
+check "setup enables the archive boundary before web" \
+    grep -q 'enable --now headlong-archive headlong-web' "$REPO/deploy/setup.sh"
+check "update restarts the archive boundary" \
+    grep -q 'try-restart headlong-archive.service' "$REPO/deploy/update.sh"
 check "update restarts only active source bridge instances" \
     grep -q "try-restart 'headlong-assistant-codex@\*.service'" "$REPO/deploy/update.sh"
 check "assistant uninstall removes units without deleting identity state" \
-    bash -c 'grep -q headlong-assistant-codex@.service "$1" && grep -q headlong-assistant-alert@.service "$1" && ! grep -q "rm .*identit" "$1"' \
+    bash -c 'grep -q headlong-assistant-codex@.service "$1" && grep -q headlong-assistant-alert@.service "$1" && grep -q headlong-archive.service "$1" && ! grep -q "rm .*identit\|rm .*\.codex" "$1"' \
         _ "$REPO/deploy/uninstall-assistant-services.sh"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

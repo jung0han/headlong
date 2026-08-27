@@ -288,7 +288,7 @@ def test_public_analysis_dashboard_and_cli_review_are_idempotent_and_session_saf
         def __init__(self):
             self.calls = []
 
-        def execute(self, operation, session_id):
+        def execute(self, operation, session_id, authorization_event_id):
             self.calls.append((operation, session_id))
             return archive_execution.AdapterResult("succeeded")
 

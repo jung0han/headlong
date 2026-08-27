@@ -12,6 +12,7 @@ dependencies = [
 [project.scripts]
 headlong-web = "headlong_web.cli:main"
 headlong-assistant = "headlong_web.assistant_cli:main"
+headlong-archive-boundary = "headlong_web.archive_boundary:main"
 
 [dependency-groups]
 dev = [

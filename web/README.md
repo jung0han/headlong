@@ -136,3 +136,10 @@ cd web/viewer && bun run typecheck
 The backend API is plain JSON under `/api/*` — see `src/headlong_web/server.py`
 for the endpoint list. Trajectory semantics (step types, fork/merge links,
 blob spillover) follow `design/trajectory_spec.md`.
+# Archive execution boundary
+
+Production archive and unarchive requests are sent to
+`headlong-archive-boundary` over `/run/headlong-archive/archive.sock`. The
+service independently verifies signed user authority and accepts only a Codex
+Session UUID plus `archive` or `unarchive`; the web process does not execute
+Codex archive commands or edit session files directly.

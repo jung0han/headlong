@@ -196,6 +196,20 @@ headlong-assistant --identity observer archive-session retry-candidate CANDIDATE
 headlong-assistant --identity observer archive-session unarchive SESSION_ID
 ```
 
+Archive and unarchive execution runs in the separately hardened
+`headlong-archive.service`. Web, CLI, and dashboard routes send an allowlisted
+request to `/run/headlong-archive/archive.sock`; the service independently
+verifies the signed Archive Directive or accepted Archive Candidate before it
+invokes Codex. The web and source-bridge units have read-only access to the
+default `CODEX_HOME`, and Observer thinkers cannot access the socket.
+
+The shipped boundary uses `CODEX_HOME=/opt/shellm/.codex`. When Codex state is
+elsewhere, set one absolute `CODEX_HOME` in `/etc/headlong/assistant.env` before
+running `deploy/update.sh`. The deploy renderer pins that same path into the
+boundary's writable allowlist and the web/bridge read-only allowlists; it
+refuses relative paths. Environment substitution does not make systemd
+filesystem allowlists dynamic, so rerun the update after changing this value.
+
 Native HeadLong learning is intentionally autonomous: the thinker may add a
 memory without a review gate. Inspect, edit, forget, restore, or rebuild native
 memory through the existing memory surfaces. Add a stricter promotion rule only

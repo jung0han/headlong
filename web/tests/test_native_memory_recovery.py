@@ -333,6 +333,90 @@ def test_incomplete_mutation_chain_does_not_replace_current_store(
     assert memory_path.read_bytes() == before
 
 
+def test_empty_recovery_history_does_not_replace_a_valid_current_store(
+    tmp_path: Path,
+) -> None:
+    repo = Path(__file__).resolve().parents[2]
+    root = tmp_path / "headlong"
+    root.mkdir()
+    identity = _identity(root)
+    service = PersonalAssistant(root, resolve_observer(root, "observer"))
+    added = _mem(repo, identity, "add", "A valid memory must survive missing history.")
+    assert added.returncode == 0
+    assert service.capture_native_memory_mutations()["added"] == 1
+    memory_path = next((identity / "memories").glob("*.md"))
+    before = memory_path.read_bytes()
+
+    ledger = identity / "trajectories" / "aaaaaaaa-root" / "trajectory.jsonl"
+    rows = [json.loads(line) for line in ledger.read_text().splitlines()]
+    ledger.write_text(json.dumps(rows[0]) + "\n")
+
+    with pytest.raises(AssistantError, match="history is incomplete"):
+        service.rebuild_native_memory()
+
+    assert memory_path.read_bytes() == before
+
+
+def test_partial_recovery_history_does_not_drop_an_unaccounted_memory(
+    tmp_path: Path,
+) -> None:
+    repo = Path(__file__).resolve().parents[2]
+    root = tmp_path / "headlong"
+    root.mkdir()
+    identity = _identity(root)
+    service = PersonalAssistant(root, resolve_observer(root, "observer"))
+    assert _mem(repo, identity, "add", "First retained memory.").returncode == 0
+    assert _mem(repo, identity, "add", "Second retained memory.").returncode == 0
+    assert service.capture_native_memory_mutations()["added"] == 2
+    before = {
+        path.name: path.read_bytes() for path in (identity / "memories").glob("*.md")
+    }
+
+    ledger = identity / "trajectories" / "aaaaaaaa-root" / "trajectory.jsonl"
+    rows = [json.loads(line) for line in ledger.read_text().splitlines()]
+    memory_rows = [row for row in rows if row.get("source_kind") == "headlong_memory"]
+    removed_id = memory_rows[-1]["memory_id"]
+    ledger.write_text(
+        "".join(
+            json.dumps(row) + "\n"
+            for row in rows
+            if row.get("memory_id") != removed_id
+        )
+    )
+
+    with pytest.raises(AssistantError, match="history is incomplete"):
+        service.rebuild_native_memory()
+
+    after = {
+        path.name: path.read_bytes() for path in (identity / "memories").glob("*.md")
+    }
+    assert after == before
+
+
+def test_recovery_history_cannot_overwrite_an_uncaptured_live_edit(
+    tmp_path: Path,
+) -> None:
+    repo = Path(__file__).resolve().parents[2]
+    root = tmp_path / "headlong"
+    root.mkdir()
+    identity = _identity(root)
+    service = PersonalAssistant(root, resolve_observer(root, "observer"))
+    added = _mem(repo, identity, "add", "Original complete value.")
+    memory_id = added.stdout.strip().split("_")[1]
+    assert service.capture_native_memory_mutations()["added"] == 1
+    memory_path = next((identity / "memories").glob("*.md"))
+    changed = memory_path.read_text().replace(
+        "Original complete value.", "Uncaptured but valid live edit."
+    )
+    memory_path.write_text(changed)
+
+    with pytest.raises(AssistantError, match="history is incomplete"):
+        service.rebuild_native_memory()
+
+    assert memory_id in memory_path.name
+    assert "Uncaptured but valid live edit." in memory_path.read_text()
+
+
 def test_restore_remains_reversible_across_repeated_forget_cycles(
     tmp_path: Path,
 ) -> None:

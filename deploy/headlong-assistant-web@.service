@@ -13,6 +13,7 @@ User=shellm
 WorkingDirectory=@SHELLM_HOME@/app
 Environment="PATH=@SHELLM_HOME@/.local/bin:/usr/local/bin:/usr/bin:/bin"
 EnvironmentFile=-/etc/headlong/assistant.env
+Environment="HEADLONG_ARCHIVE_SOCKET=/run/headlong-archive/archive.sock"
 ExecStart=/bin/bash @SHELLM_HOME@/app/deploy/assistant-service.sh @SHELLM_HOME@/app %i web
 Restart=on-failure
 RestartSec=30
@@ -28,6 +29,7 @@ ProtectControlGroups=true
 RestrictSUIDSGID=true
 LockPersonality=true
 ReadWritePaths=@SHELLM_HOME@/app/.identities/%i @SHELLM_HOME@/app/.assistant-authority @SHELLM_HOME@/app/.assistant-observers
+ReadOnlyPaths=@CODEX_HOME@
 
 [Install]
 WantedBy=headlong-assistant@%i.target

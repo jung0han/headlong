@@ -196,6 +196,20 @@ class ActiveMemoryEvaluationBody(BaseModel):
     model_config = {"extra": "forbid"}
 
 
+class MemoryFailureBody(BaseModel):
+    memory_event_id: str
+    classification: Literal[
+        "wrong_scope",
+        "evidence_contradicting",
+        "behavior_affecting",
+        "duplicate",
+        "wording_defect",
+    ]
+    description: str
+
+    model_config = {"extra": "forbid"}
+
+
 class ActiveMemoryBody(BaseModel):
     content: str | None = None
     candidate_event_id: str | None = None
@@ -895,6 +909,48 @@ def create_app(
             return assistant.PersonalAssistant(root, identity).shadow_gate_memories()
         except assistant.AssistantError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.get("/api/identities/{identity_id}/assistant/memory-failures")
+    def identity_memory_failures(identity_id: str) -> list[dict]:
+        identity = _identity_or_404(root, identity_id)
+        try:
+            return assistant.PersonalAssistant(root, identity).memory_failures()
+        except assistant.AssistantError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.get("/api/identities/{identity_id}/assistant/memory-failures/health")
+    def identity_memory_failure_health(identity_id: str) -> dict:
+        identity = _identity_or_404(root, identity_id)
+        try:
+            return assistant.PersonalAssistant(root, identity).memory_failure_health()
+        except assistant.AssistantError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/identities/{identity_id}/assistant/memory-quality-observations"
+    )
+    def identity_memory_quality_observations(identity_id: str) -> list[dict]:
+        identity = _identity_or_404(root, identity_id)
+        try:
+            return assistant.PersonalAssistant(
+                root, identity
+            ).memory_quality_observations()
+        except assistant.AssistantError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.post("/api/identities/{identity_id}/assistant/memory-failures")
+    def identity_report_memory_failure(
+        identity_id: str, body: MemoryFailureBody
+    ) -> dict:
+        _require_controls()
+        identity = _identity_or_404(root, identity_id)
+        try:
+            return assistant.PersonalAssistant(root, identity).report_memory_issue(
+                body.memory_event_id, body.classification, body.description
+            )
+        except assistant.AssistantError as exc:
+            status = 404 if "not found" in str(exc) else 422
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
 
     @app.post(
         "/api/identities/{identity_id}/assistant/shadow-gate/active-memories/"

@@ -309,7 +309,9 @@ class GovernanceService:
             )
         else:
             try:
-                result = self.archive_adapter.execute(operation, session_id)
+                result = self.archive_adapter.execute(
+                    operation, session_id, authorization_event_id
+                )
             except (OSError, RuntimeError) as exc:  # defensive adapter containment
                 result = archive_execution.AdapterResult(
                     "failed",
