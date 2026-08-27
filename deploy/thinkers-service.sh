@@ -57,6 +57,12 @@ set -o pipefail
 
 case "$ACTION" in
     start)
+        # Refuse to enter the persistent loop on a stale key, wrong provider,
+        # or endpoint mismatch. This probes both direct and shellm call paths
+        # and writes a credential-free health result before the dispatcher is
+        # forked.
+        "$APP_DIR/tools/headlong-model-probe"
+
         # Always stop first so the dispatcher runs with the environment THIS
         # invocation sourced (see bootstrap-slack-identity.sh for the
         # stale-env incident that made this unconditional). --self: service

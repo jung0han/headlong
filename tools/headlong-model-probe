@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Verify the configured model route through both public HeadLong call paths.
+# The result is intentionally metadata-only: model/provider and configuration
+# references are useful to an operator, while endpoint and credential values
+# are not copied into health output or logs.
+
+usage() {
+    cat <<'EOF'
+Usage: headlong-model-probe [--direct-only | --shellm-only]
+
+Call the configured model through bin/llm and shellm's model path. A failure
+returns non-zero and writes model_route_health.json before a persistent thinker
+loop can start.
+EOF
+}
+
+run_direct=1
+run_shellm=1
+case "${1:-}" in
+    "") ;;
+    --direct-only) run_shellm=0 ;;
+    --shellm-only) run_direct=0 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "headlong-model-probe: error: unknown option: $1" >&2; usage >&2; exit 2 ;;
+esac
+[[ $# -le 1 ]] || { echo "headlong-model-probe: error: too many arguments" >&2; exit 2; }
+
+for command_name in jq llm shellm; do
+    command -v "$command_name" >/dev/null 2>&1 \
+        || { echo "headlong-model-probe: error: required command not found: $command_name" >&2; exit 1; }
+done
+
+load_env_defaults() {
+    local envfile="$1" key value
+    [[ -f "$envfile" ]] || return 0
+    while IFS= read -r key; do
+        [[ -n "$key" && -z "${!key+x}" ]] || continue
+        # shellcheck disable=SC1090 -- same trusted operator config as llm/shellm
+        value=$(set -a; . "$envfile" 2>/dev/null; printf '%s' "${!key}") || continue
+        export "$key=$value"
+    done < <(sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}\([A-Za-z_][A-Za-z0-9_]*\)[[:space:]]*=.*/\2/p' "$envfile")
+}
+
+# Match the public CLIs: the real environment wins, then cwd and state-home
+# configuration fill missing values. This keeps a manually invoked probe on
+# the exact route that the subsequent thinker service will inherit.
+load_env_defaults ".env"
+state_home="${HEADLONG_HOME:-${SHELLM_HOME:-$HOME/.headlong}}"
+load_env_defaults "$state_home/.env"
+[[ -z "${IDENTITY_DIR:-}" ]] || load_env_defaults "$IDENTITY_DIR/.env"
+health_dir="${IDENTITY_DIR:-$state_home}/run"
+health_file="$health_dir/model_route_health.json"
+mkdir -p "$health_dir"
+
+tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/headlong-model-probe.XXXXXX")
+trap 'rm -rf "$tmp_dir"' EXIT
+
+redact() {
+    local out="$1" name value
+    for name in ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY OPENROUTER_API_KEY OPENCODE_API_KEY LLM_API_URL SHELLM_API_URL; do
+        value="${!name:-}"
+        [[ -n "$value" ]] && out="${out//"$value"/<redacted>}"
+    done
+    printf '%s' "$out"
+}
+
+last_error() {
+    local file="$1" line
+    line=$(sed '/^[[:space:]]*$/d' "$file" 2>/dev/null | tail -1 || true)
+    redact "${line:-model call exited without an error message}"
+}
+
+direct_status=skipped
+shellm_status=skipped
+direct_error=""
+shellm_error=""
+
+if [[ "$run_direct" -eq 1 ]]; then
+    if LLM_RETRIES=0 llm --no-stream -t 256 \
+        "Reply with the single word: ok" \
+        >"$tmp_dir/direct.out" 2>"$tmp_dir/direct.err" \
+        && [[ -s "$tmp_dir/direct.out" ]]; then
+        direct_status=ok
+    else
+        direct_status=failed
+        direct_error=$(last_error "$tmp_dir/direct.err")
+    fi
+fi
+
+if [[ "$run_shellm" -eq 1 ]]; then
+    if LLM_RETRIES=0 shellm --model-probe \
+        >"$tmp_dir/shellm.out" 2>"$tmp_dir/shellm.err" \
+        && [[ -s "$tmp_dir/shellm.out" ]]; then
+        shellm_status=ok
+    else
+        shellm_status=failed
+        shellm_error=$(last_error "$tmp_dir/shellm.err")
+    fi
+fi
+
+ok=true
+[[ "$direct_status" == failed || "$shellm_status" == failed ]] && ok=false
+
+# The last llm call records the resolved provider/model. Prefer that over
+# duplicating model-name detection here; an explicit LLM_PROVIDER therefore
+# works for arbitrary LiteLLM catalog identifiers.
+llm_health_home="${HEADLONG_HOME:-${SHELLM_HOME:-$HOME/.headlong}}"
+llm_health_file="$llm_health_home/run/llm_health.json"
+resolved_provider="${LLM_PROVIDER:-}"
+resolved_model="${SHELLM_MODEL:-}"
+if [[ -s "$llm_health_file" ]]; then
+    [[ -n "$resolved_provider" ]] || resolved_provider=$(jq -r '.provider // empty' "$llm_health_file" 2>/dev/null || true)
+    [[ -n "$resolved_model" ]] || resolved_model=$(jq -r '.model // empty' "$llm_health_file" 2>/dev/null || true)
+fi
+
+endpoint_ref=provider-default
+if [[ -n "${SHELLM_API_URL:-}" ]]; then
+    endpoint_ref=SHELLM_API_URL
+elif [[ -n "${LLM_API_URL:-}" ]]; then
+    endpoint_ref=LLM_API_URL
+fi
+
+credential_ref=""
+case "$resolved_provider" in
+    anthropic) credential_ref=ANTHROPIC_API_KEY ;;
+    openai) credential_ref=OPENAI_API_KEY ;;
+    gemini) credential_ref=GEMINI_API_KEY ;;
+    openrouter) credential_ref=OPENROUTER_API_KEY ;;
+    opencode|opencode-go) credential_ref=OPENCODE_API_KEY ;;
+esac
+
+checked_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+tmp_health="$health_file.$$"
+jq -n \
+    --argjson ok "$ok" \
+    --arg checked_at "$checked_at" \
+    --arg provider "$resolved_provider" \
+    --arg model "$resolved_model" \
+    --arg endpoint_ref "$endpoint_ref" \
+    --arg credential_ref "$credential_ref" \
+    --arg direct_status "$direct_status" \
+    --arg direct_error "$direct_error" \
+    --arg shellm_status "$shellm_status" \
+    --arg shellm_error "$shellm_error" \
+    '{ok:$ok, checked_at:$checked_at,
+      route:{provider:(if $provider == "" then null else $provider end),
+             model:(if $model == "" then null else $model end),
+             endpoint_ref:$endpoint_ref,
+             credential_ref:(if $credential_ref == "" then null else $credential_ref end)},
+      paths:{direct:({status:$direct_status} + (if $direct_error == "" then {} else {error:$direct_error} end)),
+             shellm:({status:$shellm_status} + (if $shellm_error == "" then {} else {error:$shellm_error} end))}}' \
+    >"$tmp_health"
+mv -f "$tmp_health" "$health_file"
+
+if [[ "$ok" == true ]]; then
+    printf 'model route healthy: provider=%s model=%s endpoint=%s credential=%s (direct=%s, shellm=%s)\n' \
+        "${resolved_provider:-auto}" "${resolved_model:-auto}" "$endpoint_ref" \
+        "${credential_ref:-auto}" "$direct_status" "$shellm_status"
+    exit 0
+fi
+
+echo "headlong-model-probe: model route is unhealthy; persistent thinkers were not started" >&2
+printf '  provider=%s model=%s endpoint=%s credential=%s\n' \
+    "${resolved_provider:-auto}" "${resolved_model:-auto}" "$endpoint_ref" \
+    "${credential_ref:-auto}" >&2
+[[ "$direct_status" != failed ]] || printf '  direct: %s\n' "$direct_error" >&2
+[[ "$shellm_status" != failed ]] || printf '  shellm: %s\n' "$shellm_error" >&2
+printf '  health: %s\n' "$health_file" >&2
+exit 1

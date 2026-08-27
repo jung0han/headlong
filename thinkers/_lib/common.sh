@@ -338,7 +338,16 @@ _build_shellm_flags() {
     # Keys go by NAME (bare `--var NAME`): shellm reads the value from its
     # environment, so it never shows up in `ps` or the recorded command line.
     [[ -n "${SHELLM_MODEL:-}" ]] && printf '%s\n' "--var" "SHELLM_MODEL=$SHELLM_MODEL"
-    for _ak in ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY OPENROUTER_API_KEY; do
+    [[ -n "${LLM_PROVIDER:-}" ]] && printf '%s\n' "--var" "LLM_PROVIDER=$LLM_PROVIDER"
+    # Endpoint values may identify a private service. Forward them by name so
+    # neither process arguments nor shellm-run trajectory rows copy the value.
+    for _route_var in SHELLM_API_URL LLM_API_URL; do
+        if [[ -n "${!_route_var:-}" ]]; then
+            export "${_route_var?}"
+            printf '%s\n' "--var" "$_route_var"
+        fi
+    done
+    for _ak in ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY OPENROUTER_API_KEY OPENCODE_API_KEY; do
         if [[ -n "${!_ak:-}" ]]; then
             export "${_ak?}"
             printf '%s\n' "--var" "$_ak"
