@@ -16,6 +16,7 @@ AUTHORITY_SCHEMA = "headlong.authority-journal/v1"
 PROTECTED_EVENT_TYPES = frozenset(
     {
         "memory-activated",
+        "native-memory-restored",
         "proposal-review",
         "observation-evaluation",
         "active-memory-evaluation",

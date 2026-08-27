@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -87,6 +90,198 @@ def digest(value: dict[str, Any] | None) -> str:
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def replay(events: list[dict[str, Any]]) -> tuple[dict[str, dict[str, Any]], int]:
+    """Fold captured native-memory mutations into their latest safe state."""
+    current, tombstones, _last_events = replay_details(events)
+    return current, len(tombstones)
+
+
+def replay_details(
+    events: list[dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], dict[str, str]]:
+    """Return current values, retained forgotten values, and latest event ids."""
+    current: dict[str, dict[str, Any]] = {}
+    tombstones: dict[str, dict[str, Any]] = {}
+    last_events: dict[str, str] = {}
+    filenames: dict[str, str] = {}
+    for event in events:
+        if event.get("source_kind") != "headlong_memory":
+            continue
+        event_type = event.get("type")
+        if event_type not in {
+            "native-memory-added",
+            "native-memory-edited",
+            "native-memory-forgotten",
+            "native-memory-restored",
+        }:
+            raise NativeMemoryError("unsupported native memory history event")
+        if event.get("mutation_schema") != MUTATION_SCHEMA:
+            raise NativeMemoryError("unsupported native memory mutation history")
+        memory_id = event.get("memory_id")
+        if not isinstance(memory_id, str) or not _MEMORY_ID_RE.fullmatch(memory_id):
+            raise NativeMemoryError("native memory history has invalid identity")
+        if event.get("source_identity") != memory_id:
+            raise NativeMemoryError("native memory history identity does not match")
+        event_id = event.get("event_id")
+        if not isinstance(event_id, str) or event.get("step_id") != event_id:
+            raise NativeMemoryError("native memory history has invalid event identity")
+        previous_event_id = last_events.get(memory_id)
+        expected_supersedes = [previous_event_id] if previous_event_id else []
+        if event.get("supersedes_event_ids") != expected_supersedes:
+            raise NativeMemoryError("native memory history chain is incomplete")
+        prior = event.get("prior_value")
+        replacement = event.get("replacement_value")
+        if event_type == "native-memory-added":
+            if prior is not None or memory_id in current:
+                raise NativeMemoryError("native memory add history is incomplete")
+            value = _validated_value(replacement, memory_id)
+            tombstones.pop(memory_id, None)
+        elif event_type == "native-memory-edited":
+            if memory_id not in current or prior != current[memory_id]:
+                raise NativeMemoryError("native memory edit history is incomplete")
+            value = _validated_value(replacement, memory_id)
+        elif event_type == "native-memory-forgotten":
+            if (
+                replacement is not None
+                or memory_id not in current
+                or prior != current[memory_id]
+            ):
+                raise NativeMemoryError("native memory forget history is incomplete")
+            filenames.pop(current[memory_id]["filename"], None)
+            tombstones[memory_id] = current[memory_id]
+            del current[memory_id]
+            last_events[memory_id] = event_id
+            continue
+        else:
+            retained = tombstones.get(memory_id)
+            if (
+                prior is not None
+                or memory_id in current
+                or retained is None
+                or replacement != retained
+                or event.get("restored_from_event_id") != previous_event_id
+            ):
+                raise NativeMemoryError("native memory restore history is incomplete")
+            value = _validated_value(replacement, memory_id)
+            tombstones.pop(memory_id)
+        old = current.get(memory_id)
+        if old is not None:
+            filenames.pop(old["filename"], None)
+        other_id = filenames.get(value["filename"])
+        if other_id is not None and other_id != memory_id:
+            raise NativeMemoryError("native memory history has duplicate filename")
+        current[memory_id] = value
+        filenames[value["filename"]] = memory_id
+        last_events[memory_id] = event_id
+    return current, tombstones, last_events
+
+
+def rebuild_store(memory_dir: Path, current: dict[str, dict[str, Any]]) -> None:
+    """Atomically replace the Markdown projection after history validates."""
+    if memory_dir.is_symlink():
+        raise NativeMemoryError("native memory directory must not be a symlink")
+    memory_dir.parent.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix=".memories-rebuild-", dir=memory_dir.parent))
+    backup = memory_dir.parent / f".memories-backup-{os.getpid()}"
+    try:
+        for memory_id in sorted(current):
+            value = _validated_value(current[memory_id], memory_id)
+            (stage / value["filename"]).write_text(_markdown(value), encoding="utf-8")
+        if backup.exists():
+            raise NativeMemoryError("native memory rebuild backup already exists")
+        if memory_dir.exists():
+            os.replace(memory_dir, backup)
+        try:
+            os.replace(stage, memory_dir)
+        except OSError:
+            if backup.exists() and not memory_dir.exists():
+                os.replace(backup, memory_dir)
+            raise
+        if backup.exists():
+            shutil.rmtree(backup)
+    except (OSError, UnicodeError) as exc:
+        raise NativeMemoryError("cannot rebuild native memory store") from exc
+    finally:
+        if stage.exists():
+            shutil.rmtree(stage, ignore_errors=True)
+
+
+def invalidate_retrieval(identity_dir: Path) -> None:
+    """Force the native retrieval thinker to rebuild after projection changes."""
+    for path in (
+        identity_dir / "retrieval" / "index.tsv",
+        identity_dir / "retrieval" / "seen",
+    ):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise NativeMemoryError("cannot refresh native memory retrieval") from exc
+
+
+def _validated_value(value: Any, memory_id: str) -> dict[str, Any]:
+    expected = {
+        "memory_id",
+        "filename",
+        "memory_type",
+        "knowledge_scope",
+        "evidence_locators",
+        "content",
+    }
+    if not isinstance(value, dict) or set(value) != expected:
+        raise NativeMemoryError("native memory history has invalid value")
+    filename = value.get("filename")
+    memory_type = value.get("memory_type")
+    content = value.get("content")
+    if (
+        value.get("memory_id") != memory_id
+        or not isinstance(filename, str)
+        or Path(filename).name != filename
+        or not filename.endswith(".md")
+        or filename == ".md"
+        or any(char in filename for char in "\x00\r\n")
+        or not isinstance(memory_type, str)
+        or not memory_type.strip()
+        or memory_type != memory_type.strip()
+        or len(memory_type) > 128
+        or any(char in memory_type for char in "\r\n")
+        or not isinstance(content, str)
+    ):
+        raise NativeMemoryError("native memory history has unsafe value")
+    try:
+        scope = KnowledgeScope.parse(value.get("knowledge_scope"))
+    except KnowledgeScopeError as exc:
+        raise NativeMemoryError(str(exc)) from exc
+    evidence = value.get("evidence_locators")
+    if not isinstance(evidence, list) or not all(
+        isinstance(item, dict) for item in evidence
+    ):
+        raise NativeMemoryError("native memory history has invalid evidence locators")
+    return {**value, "knowledge_scope": scope.to_dict()}
+
+
+def _markdown(value: dict[str, Any]) -> str:
+    scope = KnowledgeScope.parse(value["knowledge_scope"])
+    scope_value = (
+        "global" if scope.kind == "global" else f"project:{scope.project_id}"
+    )
+    summary = (value["content"].splitlines() or [""])[0][:80].replace("\t", " ")
+    evidence = json.dumps(
+        value["evidence_locators"], ensure_ascii=False, separators=(",", ":")
+    )
+    return (
+        "---\n"
+        f"id: {value['memory_id']}\n"
+        f"summary: {summary}\n"
+        f"type: {value['memory_type']}\n"
+        f"knowledge_scope: {scope_value}\n"
+        f"evidence_locators: {evidence}\n"
+        "---\n\n"
+        f"{value['content']}\n"
+    )
 
 
 def _read_memory(path: Path) -> dict[str, Any] | None:

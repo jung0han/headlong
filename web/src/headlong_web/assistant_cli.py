@@ -86,6 +86,16 @@ def build_parser() -> argparse.ArgumentParser:
     _memory_authority_args(accept)
     memory_commands.add_parser("rebuild")
 
+    native_memory = commands.add_parser(
+        "native-memory", help="recover native HeadLong Memory"
+    )
+    native_memory_commands = native_memory.add_subparsers(
+        dest="native_memory_command", required=True
+    )
+    native_memory_commands.add_parser("rebuild")
+    restore_native_memory = native_memory_commands.add_parser("restore")
+    restore_native_memory.add_argument("memory_id")
+
     context = commands.add_parser(
         "context", help="assemble scoped Active Memory and Reference context"
     )
@@ -258,6 +268,11 @@ def run(argv: list[str] | None = None) -> int:
                     project_selector=args.project,
                     global_scope=args.global_scope,
                 )
+        elif args.command == "native-memory":
+            if args.native_memory_command == "rebuild":
+                result = assistant.rebuild_native_memory()
+            else:
+                result = assistant.restore_native_memory(args.memory_id)
         elif args.command == "context":
             result = assistant.response_context(
                 args.query, args.project, current_path=Path.cwd()
