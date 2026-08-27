@@ -327,9 +327,10 @@ _key_hint() {  # first/last 4 chars of a key for messages; never the whole thing
 }
 
 _llm_ok() {
-    # Generous cap: reasoning models spend thinking tokens against -t, and
-    # a too-small budget makes the reply come back empty.
-    llm -t 256 "Reply with the single word: ok" >/dev/null 2>>"$INIT_LOG"
+    # Verify both responder-style direct calls and shellm's model path before
+    # any persistent thinker starts. The probe writes a metadata-only health
+    # result and suppresses response content.
+    headlong-model-probe >>"$INIT_LOG" 2>&1
 }
 
 _prompt_key() {
@@ -417,9 +418,9 @@ EOF
 
     local _ var
     for _ in 1 2 3; do
-        info "Checking the LLM connection (model: ${SHELLM_MODEL})"
+        info "Checking the direct and shellm model routes (model: ${SHELLM_MODEL})"
         if _llm_ok; then
-            echo "    OK — ${SHELLM_MODEL} answered."
+            echo "    OK — ${SHELLM_MODEL} answered through both routes."
             return 0
         fi
         var=$(_first_key_var || true)
@@ -434,11 +435,7 @@ EOF
         echo "Paste a different key to try again, or press Ctrl-C to quit." >&2
         _prompt_key || die "no key entered (quit)"
     done
-    if [[ "$revalidating" -eq 1 ]]; then
-        echo "headlong-init: continuing anyway — this key worked before, so the API may just be having a moment" >&2
-        return 0
-    fi
-    die "could not validate an API key after 3 attempts"
+    die "could not validate the configured model route after 3 attempts; see $HEADLONG_HOME/run/model_route_health.json and $INIT_LOG"
 }
 
 # ---------------------------------------------------------------------------

@@ -46,6 +46,11 @@ spelling), `HEADLONG_NO_DASH=1`,
 `HEADLONG_NO_THINKERS=1`. The installer never uses sudo. In a container as
 root it apt-installs its own dependencies.
 
+For an OpenAI-compatible gateway with arbitrary model ids, set
+`LLM_PROVIDER=openai`, `LLM_API_URL`, `OPENAI_API_KEY`, and `SHELLM_MODEL`.
+`headlong-model-probe` verifies both the direct and shellm paths; persistent
+thinkers do not start when that probe fails.
+
 Warning: the installer symlinks tools into `~/.local/bin`. If those names
 already link into a development checkout, the one-liner repoints them to
 `<state-home>/app`. Do not run it against a HOME you did not create for it.
