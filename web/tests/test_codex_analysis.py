@@ -216,6 +216,7 @@ def test_provisional_final_and_later_revision_are_timed_and_append_only(
         assert response_format["json_schema"]["name"] == "codex_session_analysis"
         assert response_format["json_schema"]["strict"] is True
         assert response_format["json_schema"]["schema"]["additionalProperties"] is False
+        assert model.calls[0]["max_tokens"] == 4096
         assert assistant.analyze_codex_once(active, archived)["duplicate"] == 1
 
         clock.advance(minutes=24, seconds=59)

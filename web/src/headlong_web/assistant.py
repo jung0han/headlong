@@ -64,6 +64,7 @@ _MAX_OBSERVATION = 1200
 _MAX_MEMORY_KEY = 120
 _MAX_CODEX_ANALYSIS_PROMPT_BYTES = 128 * 1024
 _MAX_CODEX_ANALYSIS_RECORD_BYTES = 16 * 1024
+_CODEX_ANALYSIS_MAX_TOKENS = 4096
 
 
 class AssistantError(RuntimeError):
@@ -1871,7 +1872,7 @@ class PersonalAssistant:
             return self._model.complete_structured(
                 prompt,
                 system=system,
-                token_timeout=1600,
+                token_timeout=_CODEX_ANALYSIS_MAX_TOKENS,
                 operation="Codex Session analysis",
                 schema=codex_analysis.result_schema(allowed),
             )
