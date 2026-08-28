@@ -1870,7 +1870,8 @@ class PersonalAssistant:
             _MAX_CODEX_ANALYSIS_PROMPT_BYTES - len(prompt_prefix.encode("utf-8")),
         )
         allowed = {
-            locator.encode(): locator.to_dict() for locator, _raw in excerpt_rows
+            _analysis_locator_token(index): locator.to_dict()
+            for index, (locator, _raw) in enumerate(excerpt_rows)
         }
         prompt = prompt_prefix + excerpt
         try:
@@ -3021,8 +3022,7 @@ def _bounded_analysis_excerpt(
         raise AssistantError("Codex Session has no records to analyze")
     estimated_complete = sum(_analysis_row_size(row) for row in rows) + len(rows) - 1
     if estimated_complete <= budget_bytes:
-        rendered = [_render_analysis_row(row) for row in rows]
-        complete = "\n".join(rendered)
+        complete = _render_analysis_rows(rows)
         if len(complete.encode("utf-8")) <= budget_bytes:
             return complete, rows
 
@@ -3033,26 +3033,38 @@ def _bounded_analysis_excerpt(
     )
     marker_budget = len(marker_template.format(omitted=len(rows)).encode("utf-8"))
     remaining = budget_bytes - marker_budget
-    selected: dict[int, str] = {}
+    selected: set[int] = set()
     priority = [len(rows) - 1]
     if len(rows) > 1:
         priority.append(0)
     priority.extend(range(len(rows) - 2, 0, -1))
     for index in priority:
-        value = _render_analysis_row(rows[index])
         separator = 1 if selected else 0
-        size = len(value.encode("utf-8")) + separator
+        size = _analysis_row_size(rows[index]) + separator
         if size <= remaining:
-            selected[index] = value
+            selected.add(index)
             remaining -= size
 
     selected_rows = [rows[index] for index in sorted(selected)]
     excerpt = marker_template.format(omitted=len(rows) - len(selected_rows))
-    excerpt += "\n".join(selected[index] for index in sorted(selected))
+    excerpt += _render_analysis_rows(selected_rows)
     return excerpt, selected_rows
 
 
-def _render_analysis_row(row: tuple[EvidenceLocator, bytes]) -> str:
+def _analysis_locator_token(index: int) -> str:
+    return f"E{index + 1}"
+
+
+def _render_analysis_rows(rows: list[tuple[EvidenceLocator, bytes]]) -> str:
+    return "\n".join(
+        _render_analysis_row(row, _analysis_locator_token(index))
+        for index, row in enumerate(rows)
+    )
+
+
+def _render_analysis_row(
+    row: tuple[EvidenceLocator, bytes], locator_token: str
+) -> str:
     locator, raw = row
     text = raw.decode("utf-8", errors="replace").rstrip("\n")
     encoded = text.encode("utf-8")
@@ -3064,7 +3076,7 @@ def _render_analysis_row(row: tuple[EvidenceLocator, bytes]) -> str:
         head = encoded[:head_size].decode("utf-8", errors="ignore")
         tail = encoded[-tail_size:].decode("utf-8", errors="ignore")
         text = head + marker.decode("utf-8") + tail
-    return f"EVIDENCE_LOCATOR {locator.encode()}\n{text}"
+    return f"EVIDENCE_LOCATOR {locator_token}\n{text}"
 
 
 def _analysis_row_size(row: tuple[EvidenceLocator, bytes]) -> int:

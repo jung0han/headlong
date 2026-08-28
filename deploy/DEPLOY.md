@@ -199,6 +199,10 @@ and confirm that the model scheduler's waiting queue drains.
 Strict Codex Session analysis is bounded to 4,096 output tokens, one learning
 candidate of each kind, up to two Archive Candidates, and one Evidence Locator
 per conclusion.
+The model sees request-local short locator tokens constrained by the schema;
+Headlong resolves a selected token back to the canonical locator before writing
+the Activity Ledger. Do not put full encoded locators into the schema enum,
+because grammar compilation time grows with every repeated encoded value.
 Keep those semantic bounds aligned between the JSON Schema, local validator,
 and analysis prompt. Raising only the token ceiling makes long-session latency
 unbounded and can outlive the model subprocess timeout.

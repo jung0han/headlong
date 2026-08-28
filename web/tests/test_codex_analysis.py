@@ -223,6 +223,11 @@ def test_provisional_final_and_later_revision_are_timed_and_append_only(
             for line in model.calls[0]["messages"][-1]["content"].splitlines()
             if line.startswith("EVIDENCE_LOCATOR ")
         )
+        assert supplied_locators[0] == "E1"
+        assert all(
+            locator.startswith("E") and locator[1:].isdigit()
+            for locator in supplied_locators
+        )
         assert (
             schema["properties"]["evidence_locators"]["items"]["enum"]
             == supplied_locators
