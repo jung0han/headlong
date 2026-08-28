@@ -19,12 +19,13 @@ FINAL_AFTER = timedelta(minutes=30)
 MAX_TITLE = 160
 MAX_CONTENT = 1200
 MAX_FINDINGS = 1
+MAX_ARCHIVE_CANDIDATES = 2
 MAX_EVIDENCE_LOCATORS = 1
 
 
 def result_schema(allowed: dict[str, dict[str, Any]]) -> StructuredResultSchema:
     """Return the provider and local contract for one Codex source revision."""
-    locator = {"type": "string", "minLength": 1, "maxLength": 2048}
+    locator = {"type": "string", "enum": sorted(allowed)}
     locators = {
         "type": "array",
         "items": locator,
@@ -101,7 +102,7 @@ def result_schema(allowed: dict[str, dict[str, Any]]) -> StructuredResultSchema:
             "archive_candidates": {
                 "type": "array",
                 "items": archive_candidate,
-                "maxItems": MAX_FINDINGS,
+                "maxItems": MAX_ARCHIVE_CANDIDATES,
             },
         },
         "required": [
@@ -192,7 +193,7 @@ def validate_result(value: Any, allowed: dict[str, dict[str, Any]]) -> dict[str,
 def _archive_candidates(
     values: Any, allowed: dict[str, dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    if not isinstance(values, list) or len(values) > MAX_FINDINGS:
+    if not isinstance(values, list) or len(values) > MAX_ARCHIVE_CANDIDATES:
         raise AnalysisContractError("model Archive Candidates must be a bounded array")
     output: list[dict[str, Any]] = []
     expected = {"completion_state", "rationale", "evidence_locators"}

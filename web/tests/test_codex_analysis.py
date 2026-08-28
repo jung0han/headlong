@@ -218,16 +218,30 @@ def test_provisional_final_and_later_revision_are_timed_and_append_only(
         schema = response_format["json_schema"]["schema"]
         assert schema["additionalProperties"] is False
         assert schema["properties"]["evidence_locators"]["maxItems"] == 1
-        for field in (
-            "memory_candidates",
-            "improvement_signals",
-            "archive_candidates",
+        supplied_locators = sorted(
+            line.removeprefix("EVIDENCE_LOCATOR ")
+            for line in model.calls[0]["messages"][-1]["content"].splitlines()
+            if line.startswith("EVIDENCE_LOCATOR ")
+        )
+        assert (
+            schema["properties"]["evidence_locators"]["items"]["enum"]
+            == supplied_locators
+        )
+        for field, max_items in (
+            ("memory_candidates", 1),
+            ("improvement_signals", 1),
+            ("archive_candidates", 2),
         ):
-            assert schema["properties"][field]["maxItems"] == 1
+            assert schema["properties"][field]["maxItems"] == max_items
             assert (
                 schema["properties"][field]["items"]["properties"]
                 ["evidence_locators"]["maxItems"]
                 == 1
+            )
+            assert (
+                schema["properties"][field]["items"]["properties"]
+                ["evidence_locators"]["items"]["enum"]
+                == supplied_locators
             )
         assert model.calls[0]["max_tokens"] == 4096
         assert assistant.analyze_codex_once(active, archived)["duplicate"] == 1
