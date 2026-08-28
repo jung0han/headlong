@@ -18,6 +18,8 @@ PROVISIONAL_AFTER = timedelta(minutes=5)
 FINAL_AFTER = timedelta(minutes=30)
 MAX_TITLE = 160
 MAX_CONTENT = 1200
+MAX_FINDINGS = 3
+MAX_EVIDENCE_LOCATORS = 2
 
 
 def result_schema(allowed: dict[str, dict[str, Any]]) -> StructuredResultSchema:
@@ -27,7 +29,7 @@ def result_schema(allowed: dict[str, dict[str, Any]]) -> StructuredResultSchema:
         "type": "array",
         "items": locator,
         "minItems": 1,
-        "maxItems": 50,
+        "maxItems": MAX_EVIDENCE_LOCATORS,
     }
     finding = {
         "type": "object",
@@ -89,17 +91,17 @@ def result_schema(allowed: dict[str, dict[str, Any]]) -> StructuredResultSchema:
             "memory_candidates": {
                 "type": "array",
                 "items": finding,
-                "maxItems": 20,
+                "maxItems": MAX_FINDINGS,
             },
             "improvement_signals": {
                 "type": "array",
                 "items": signal,
-                "maxItems": 20,
+                "maxItems": MAX_FINDINGS,
             },
             "archive_candidates": {
                 "type": "array",
                 "items": archive_candidate,
-                "maxItems": 20,
+                "maxItems": MAX_FINDINGS,
             },
         },
         "required": [
@@ -190,7 +192,7 @@ def validate_result(value: Any, allowed: dict[str, dict[str, Any]]) -> dict[str,
 def _archive_candidates(
     values: Any, allowed: dict[str, dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    if not isinstance(values, list) or len(values) > 20:
+    if not isinstance(values, list) or len(values) > MAX_FINDINGS:
         raise AnalysisContractError("model Archive Candidates must be a bounded array")
     output: list[dict[str, Any]] = []
     expected = {"completion_state", "rationale", "evidence_locators"}
@@ -264,7 +266,7 @@ def _findings(
     *,
     signal: bool,
 ) -> list[dict[str, Any]]:
-    if not isinstance(values, list) or len(values) > 20:
+    if not isinstance(values, list) or len(values) > MAX_FINDINGS:
         raise AnalysisContractError("model analysis findings must be a bounded array")
     output: list[dict[str, Any]] = []
     allowed_kinds = {
@@ -312,7 +314,11 @@ def _locators(
     allowed: dict[str, dict[str, Any]],
     field: str,
 ) -> list[dict[str, Any]]:
-    if not isinstance(values, list) or not values or len(values) > 50:
+    if (
+        not isinstance(values, list)
+        or not values
+        or len(values) > MAX_EVIDENCE_LOCATORS
+    ):
         raise AnalysisContractError(
             f"{field} requires a bounded Evidence Locator array"
         )
