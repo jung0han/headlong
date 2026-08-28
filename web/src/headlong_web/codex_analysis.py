@@ -18,8 +18,8 @@ PROVISIONAL_AFTER = timedelta(minutes=5)
 FINAL_AFTER = timedelta(minutes=30)
 MAX_TITLE = 160
 MAX_CONTENT = 1200
-MAX_FINDINGS = 3
-MAX_EVIDENCE_LOCATORS = 2
+MAX_FINDINGS = 1
+MAX_EVIDENCE_LOCATORS = 1
 
 
 def result_schema(allowed: dict[str, dict[str, Any]]) -> StructuredResultSchema:

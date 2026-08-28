@@ -196,8 +196,8 @@ caller has disconnected. A process-level health response is insufficient for
 readiness: after changing this route, verify one real non-streaming inference
 and confirm that the model scheduler's waiting queue drains.
 
-Strict Codex Session analysis is bounded to 4,096 output tokens, the three
-strongest candidates of each kind, and two Evidence Locators per conclusion.
+Strict Codex Session analysis is bounded to 4,096 output tokens, the single
+strongest candidate of each kind, and one Evidence Locator per conclusion.
 Keep those semantic bounds aligned between the JSON Schema, local validator,
 and analysis prompt. Raising only the token ceiling makes long-session latency
 unbounded and can outlive the model subprocess timeout.

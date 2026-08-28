@@ -217,17 +217,17 @@ def test_provisional_final_and_later_revision_are_timed_and_append_only(
         assert response_format["json_schema"]["strict"] is True
         schema = response_format["json_schema"]["schema"]
         assert schema["additionalProperties"] is False
-        assert schema["properties"]["evidence_locators"]["maxItems"] == 2
+        assert schema["properties"]["evidence_locators"]["maxItems"] == 1
         for field in (
             "memory_candidates",
             "improvement_signals",
             "archive_candidates",
         ):
-            assert schema["properties"][field]["maxItems"] == 3
+            assert schema["properties"][field]["maxItems"] == 1
             assert (
                 schema["properties"][field]["items"]["properties"]
                 ["evidence_locators"]["maxItems"]
-                == 2
+                == 1
             )
         assert model.calls[0]["max_tokens"] == 4096
         assert assistant.analyze_codex_once(active, archived)["duplicate"] == 1
