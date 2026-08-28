@@ -15,6 +15,10 @@ Environment="PATH=@SHELLM_HOME@/.local/bin:/usr/local/bin:/usr/bin:/bin"
 # Host-specific CODEX_HOME and intervals belong here, outside the repository.
 EnvironmentFile=-/etc/headlong/assistant.env
 Environment="HEADLONG_ARCHIVE_SOCKET=/run/headlong-archive/archive.sock"
+ExecCondition=/usr/bin/test -r @CODEX_HOME@/sessions
+ExecCondition=/usr/bin/test -x @CODEX_HOME@/sessions
+ExecCondition=/usr/bin/test -r @CODEX_HOME@/archived_sessions
+ExecCondition=/usr/bin/test -x @CODEX_HOME@/archived_sessions
 ExecStart=/bin/bash @SHELLM_HOME@/app/deploy/assistant-service.sh @SHELLM_HOME@/app %i codex
 Restart=on-failure
 RestartSec=10

@@ -35,7 +35,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "==> Installing system packages"
 apt-get update -qq
-apt-get install -y -qq git jq curl unzip bubblewrap
+apt-get install -y -qq git jq curl unzip bubblewrap acl
 
 # Real Node is required for the frontend build: without it, bun shims
 # `node` with itself and react-router's build crashes on react-dom's
@@ -88,8 +88,17 @@ ENV
 fi
 
 echo "==> Installing systemd service"
+# Never take ownership of an existing external Codex home. A host operator may
+# keep it private or delegate service access separately; setup only provisions
+# the path when it is absent.
+if [[ -e "$CODEX_HOME" ]]; then
+    [[ -d "$CODEX_HOME" ]] \
+        || { echo "ERROR: CODEX_HOME is not a directory: $CODEX_HOME" >&2; exit 1; }
+else
+    install -d -o "$SHELLM_USER" -g "$SHELLM_USER" -m 0700 "$CODEX_HOME"
+fi
 install -d -o "$SHELLM_USER" -g "$SHELLM_USER" -m 0700 \
-    "$CODEX_HOME" "$APP_DIR/.assistant-authority"
+    "$APP_DIR/.assistant-authority"
 sed -e "s|@SHELLM_HOME@|$SHELLM_HOME|g" -e "s|@CODEX_HOME@|$CODEX_HOME|g" "$SCRIPT_DIR/headlong-archive.service" \
     > /etc/systemd/system/headlong-archive.service
 sed -e "s|@SHELLM_HOME@|$SHELLM_HOME|g" -e "s|@CODEX_HOME@|$CODEX_HOME|g" "$SCRIPT_DIR/headlong-web.service" \

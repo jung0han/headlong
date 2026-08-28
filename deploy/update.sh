@@ -15,6 +15,10 @@ if [[ ! -x /usr/bin/bwrap ]]; then
     echo "==> Installing bubblewrap for archive child-process isolation"
     sudo apt-get install -y -qq bubblewrap
 fi
+if ! command -v setfacl >/dev/null 2>&1; then
+    echo "==> Installing ACL tools for explicit external Codex access"
+    sudo apt-get install -y -qq acl
+fi
 
 echo "==> Pulling latest"
 sudo -u shellm git -C "$APP_DIR" pull --ff-only
@@ -72,8 +76,17 @@ fi
 # at the socket boundary rather than running Codex in the web cgroup.
 archive_unit_src="$APP_DIR/deploy/headlong-archive.service"
 if [[ -f "$archive_unit_src" ]]; then
-    sudo install -d -o shellm -g shellm -m 0700 \
-        "$CODEX_HOME" "$APP_DIR/.assistant-authority"
+    # An external CODEX_HOME belongs to its operator. `install -d -o` also
+    # chowns an existing directory, which can lock that operator out of their
+    # own Codex state. Only provision the default/missing directory; access to
+    # an existing external home must be delegated explicitly by the operator.
+    if [[ -e "$CODEX_HOME" ]]; then
+        [[ -d "$CODEX_HOME" ]] \
+            || { echo "==> ERROR: CODEX_HOME is not a directory: $CODEX_HOME" >&2; exit 1; }
+    else
+        sudo install -d -o shellm -g shellm -m 0700 "$CODEX_HOME"
+    fi
+    sudo install -d -o shellm -g shellm -m 0700 "$APP_DIR/.assistant-authority"
     archive_rendered=$(sed -e "s|@SHELLM_HOME@|$SHELLM_HOME|g" -e "s|@CODEX_HOME@|$CODEX_HOME|g" "$archive_unit_src")
     if ! printf '%s\n' "$archive_rendered" | cmp -s - /etc/systemd/system/headlong-archive.service 2>/dev/null; then
         echo "==> Installing hardened archive boundary"
