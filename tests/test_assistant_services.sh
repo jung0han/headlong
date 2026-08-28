@@ -98,6 +98,12 @@ check "Observer thinker cannot reach archive boundary socket" \
 check "archive boundary is allowlisted and separately hardened" \
     bash -c 'grep -q "^RestrictAddressFamilies=AF_UNIX" "$1" && grep -q "^PrivateNetwork=true" "$1" && grep -q "^CapabilityBoundingSet=$" "$1" && grep -q "^ExecCondition=/usr/bin/test -x /usr/bin/bwrap$" "$1" && grep -q "^ReadWritePaths=@CODEX_HOME@ @SHELLM_HOME@/app/.assistant-authority$" "$1" && ! grep -q "assistant-service.sh" "$1"' \
         _ "$REPO/deploy/headlong-archive.service"
+check "archive boundary fails closed without delegated Codex write access" \
+    bash -c 'grep -q "^ExecCondition=/usr/bin/test -r @CODEX_HOME@$" "$1" && grep -q "^ExecCondition=/usr/bin/test -w @CODEX_HOME@/sessions$" "$1" && grep -q "^ExecCondition=/usr/bin/test -w @CODEX_HOME@/archived_sessions$" "$1"' \
+        _ "$REPO/deploy/headlong-archive.service"
+check "Codex bridge fails closed without delegated source access" \
+    bash -c 'grep -q "^ExecCondition=/usr/bin/test -r @CODEX_HOME@/sessions$" "$1" && grep -q "^ExecCondition=/usr/bin/test -x @CODEX_HOME@/sessions$" "$1" && grep -q "^ExecCondition=/usr/bin/test -r @CODEX_HOME@/archived_sessions$" "$1"' \
+        _ "$REPO/deploy/headlong-assistant-codex@.service"
 check "web and bridges cannot directly mutate configured Codex state" \
     bash -c 'grep -q "^ReadOnlyPaths=@CODEX_HOME@$" "$1" && grep -q "^ReadOnlyPaths=@CODEX_HOME@$" "$2" && grep -q "^ReadOnlyPaths=@CODEX_HOME@$" "$3"' \
         _ "$REPO/deploy/headlong-web.service" \
@@ -158,15 +164,28 @@ check "setup installs the assistant failure alert unit" \
 check "setup enables the archive boundary before web" \
     grep -q 'enable --now headlong-archive headlong-web' "$REPO/deploy/setup.sh"
 check "setup creates the archive result journal allowlist" \
-    grep -q '"$CODEX_HOME" "$APP_DIR/.assistant-authority"' "$REPO/deploy/setup.sh"
+    grep -q '"$APP_DIR/.assistant-authority"' "$REPO/deploy/setup.sh"
+check "setup preserves an existing external Codex home" \
+    bash -c 'grep -q '\''if \[\[ -e "$CODEX_HOME" \]\]'\'' "$1" && ! grep -q '\''"$CODEX_HOME" "$APP_DIR/.assistant-authority"'\'' "$1"' \
+        _ "$REPO/deploy/setup.sh"
 check "setup installs the archive child-process sandbox" \
     grep -q 'bubblewrap' "$REPO/deploy/setup.sh"
+check "setup installs explicit ACL delegation support" \
+    grep -q 'bubblewrap acl' "$REPO/deploy/setup.sh"
+check "external Codex access is an explicit ACL delegation" \
+    bash -c 'grep -q "setfacl" "$1" && ! grep -q "chown\|chmod" "$1"' \
+        _ "$REPO/deploy/grant-codex-access.sh"
 check "update restarts the archive boundary" \
     grep -q 'try-restart headlong-archive.service' "$REPO/deploy/update.sh"
 check "update preserves the archive result journal allowlist" \
-    grep -q '"$CODEX_HOME" "$APP_DIR/.assistant-authority"' "$REPO/deploy/update.sh"
+    grep -q '"$APP_DIR/.assistant-authority"' "$REPO/deploy/update.sh"
+check "update preserves an existing external Codex home" \
+    bash -c 'grep -q '\''if \[\[ -e "$CODEX_HOME" \]\]'\'' "$1" && ! grep -q '\''"$CODEX_HOME" "$APP_DIR/.assistant-authority"'\'' "$1"' \
+        _ "$REPO/deploy/update.sh"
 check "update installs a missing archive child-process sandbox" \
     grep -q 'bubblewrap' "$REPO/deploy/update.sh"
+check "update installs missing ACL delegation support" \
+    grep -q 'apt-get install -y -qq acl' "$REPO/deploy/update.sh"
 check "update synchronizes the web venv before hardened services start" \
     bash -c '
         sync_line=$(grep -n "cd .*APP_DIR/web.*uv sync" "$1" | head -1 | cut -d: -f1)

@@ -16,6 +16,10 @@ Environment="CODEX_HOME=@CODEX_HOME@"
 RuntimeDirectory=headlong-archive
 RuntimeDirectoryMode=0700
 ExecCondition=/usr/bin/test -x /usr/bin/bwrap
+ExecCondition=/usr/bin/test -r @CODEX_HOME@
+ExecCondition=/usr/bin/test -x @CODEX_HOME@
+ExecCondition=/usr/bin/test -w @CODEX_HOME@/sessions
+ExecCondition=/usr/bin/test -w @CODEX_HOME@/archived_sessions
 ExecStart=/bin/bash @SHELLM_HOME@/app/tools/headlong-archive-boundary --root @SHELLM_HOME@/app --socket /run/headlong-archive/archive.sock
 Restart=on-failure
 RestartSec=5

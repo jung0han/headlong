@@ -214,6 +214,25 @@ running `deploy/update.sh`. The deploy renderer pins that same path into the
 boundary's writable allowlist and the web/bridge read-only allowlists; it
 refuses relative paths. Environment substitution does not make systemd
 filesystem allowlists dynamic, so rerun the update after changing this value.
+Setup and update never change the owner, group, mode, or ACLs of an existing
+external `CODEX_HOME`. Explicitly delegate the bounded session/archive access
+required by the `shellm` service account, then rerun the update:
+
+```bash
+sudo bash /opt/shellm/app/deploy/grant-codex-access.sh /home/operator/.codex shellm
+sudo bash /opt/shellm/app/deploy/update.sh
+```
+
+The delegation keeps the Codex home's owner unchanged, grants ACLs only on the
+home directory, session trees, and versioned state database, and deliberately
+excludes root auth/config files. Because POSIX ACL masks are reported in the
+group mode bits, `stat` no longer displays numeric mode `0700` after effective
+`shellm` access is granted; inspect `getfacl` for the actual per-user boundary.
+Do not recursively `chown` or `chmod` an operator's Codex state.
+The Codex bridge is skipped unless it can read and traverse both session roots;
+the archive boundary is skipped unless it can also write both roots. These
+conditions keep an undelegated external home fail-closed instead of starting a
+service that can only fail on its first archive request.
 
 Native HeadLong learning is intentionally autonomous: the thinker may add a
 memory without a review gate. Inspect, edit, forget, restore, or rebuild native
