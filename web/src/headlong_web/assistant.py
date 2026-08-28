@@ -31,6 +31,7 @@ from headlong_web import (
     discovery,
     hacker_news,
     knowledge,
+    localized_projection,
     model_gateway,
     memory_failures,
     native_memory,
@@ -905,35 +906,57 @@ class PersonalAssistant:
     def proposals(self) -> list[dict[str, Any]]:
         """Return the Proposal Inbox rebuilt from the canonical ledger."""
         try:
-            return self._governance.proposals()
-        except assistant_services.AssistantServiceError as exc:
+            return self._localize("proposal", self._governance.proposals())
+        except (
+            assistant_services.AssistantServiceError,
+            localized_projection.LocalizedProjectionError,
+        ) as exc:
             raise AssistantError(str(exc)) from exc
 
     def proposal(self, proposal_id: str) -> dict[str, Any] | None:
         try:
-            return self._governance.proposal(proposal_id)
-        except assistant_services.AssistantServiceError as exc:
+            proposal = self._governance.proposal(proposal_id)
+            if proposal is None:
+                return None
+            return self._localize("proposal", [proposal])[0]
+        except (
+            assistant_services.AssistantServiceError,
+            localized_projection.LocalizedProjectionError,
+        ) as exc:
             raise AssistantError(str(exc)) from exc
 
     def review_proposal(self, proposal_id: str, state: str) -> dict[str, Any]:
         """Append one review event and return the rebuilt current proposal."""
         with self._state_lock():
             try:
-                return self._governance.review_proposal(proposal_id, state)
-            except assistant_services.AssistantServiceError as exc:
+                reviewed = self._governance.review_proposal(proposal_id, state)
+                return self._localize("proposal", [reviewed])[0]
+            except (
+                assistant_services.AssistantServiceError,
+                localized_projection.LocalizedProjectionError,
+            ) as exc:
                 raise AssistantError(str(exc)) from exc
 
     def archive_candidates(self) -> list[dict[str, Any]]:
         """Return Archive Candidates rebuilt from the canonical ledger."""
         try:
-            return self._governance.archive_candidates()
-        except assistant_services.AssistantServiceError as exc:
+            return self._localize("archive", self._governance.archive_candidates())
+        except (
+            assistant_services.AssistantServiceError,
+            localized_projection.LocalizedProjectionError,
+        ) as exc:
             raise AssistantError(str(exc)) from exc
 
     def archive_candidate(self, candidate_id: str) -> dict[str, Any] | None:
         try:
-            return self._governance.archive_candidate(candidate_id)
-        except assistant_services.AssistantServiceError as exc:
+            candidate = self._governance.archive_candidate(candidate_id)
+            if candidate is None:
+                return None
+            return self._localize("archive", [candidate])[0]
+        except (
+            assistant_services.AssistantServiceError,
+            localized_projection.LocalizedProjectionError,
+        ) as exc:
             raise AssistantError(str(exc)) from exc
 
     def review_archive_candidates(
@@ -945,9 +968,11 @@ class PersonalAssistant:
                 reviewed = self._governance.review_archive_candidates(
                     candidate_ids, state
                 )
+                reviewed = self._localize("archive", reviewed)
             except (
                 assistant_services.AssistantServiceError,
                 archive_execution.ArchiveExecutionError,
+                localized_projection.LocalizedProjectionError,
             ) as exc:
                 raise AssistantError(str(exc)) from exc
             self._write_archive_health()
@@ -1048,13 +1073,89 @@ class PersonalAssistant:
             self._resolve_project(project_selector).id if project_selector else None
         )
         try:
-            return active_memory.select_scope(
+            selected = active_memory.select_scope(
                 active_memory.candidate_records(self._ledger_events()),
                 project_id=project_id,
                 global_only=global_only,
                 include_global=include_global,
             )
-        except active_memory.ActiveMemoryError as exc:
+            return self._localize("memory", selected)
+        except (
+            active_memory.ActiveMemoryError,
+            localized_projection.LocalizedProjectionError,
+        ) as exc:
+            raise AssistantError(str(exc)) from exc
+
+    def localize_pending(self, language: str = "ko") -> dict[str, Any]:
+        """Translate unresolved human-review items into a replaceable projection."""
+        try:
+            sources = {
+                "proposal": [
+                    item
+                    for item in self._governance.proposals()
+                    if item.get("review_state") == "pending"
+                ],
+                "archive": [
+                    item
+                    for item in self._governance.archive_candidates()
+                    if item.get("review_state") == "pending"
+                ],
+                "memory": active_memory.candidate_records(self._ledger_events()),
+            }
+            records: list[dict[str, str]] = []
+            translated = {kind: 0 for kind in sources}
+            already_localized = {kind: 0 for kind in sources}
+            for kind, items in sources.items():
+                pending = []
+                for item in items:
+                    if localized_projection.has_translation(
+                        self.identity.path, language, kind, item
+                    ):
+                        already_localized[kind] += 1
+                    else:
+                        pending.append(item)
+                for offset in range(0, len(pending), 8):
+                    batch = pending[offset : offset + 8]
+                    targets = localized_projection.translation_targets(kind, batch)
+                    result = self._model.complete_structured(
+                        json.dumps(
+                            {"target_language": language, "items": targets},
+                            ensure_ascii=False,
+                        ),
+                        system=(
+                            "Translate only the human-readable title and content fields. "
+                            "Preserve each id exactly. Preserve code identifiers, commands, "
+                            "file paths, URLs, model names, and issue IDs verbatim. Do not add "
+                            "claims or explanations. "
+                            + localized_projection.human_output_instruction(language)
+                        ),
+                        token_timeout=4096,
+                        operation="pending item localization",
+                        schema=localized_projection.translation_result_schema(
+                            targets, language
+                        ),
+                    )
+                    records.extend(
+                        localized_projection.records_from_result(kind, batch, result)
+                    )
+                    translated[kind] += len(batch)
+            with self._state_lock():
+                changed = localized_projection.write_translations(
+                    self.identity.path, language, records
+                )
+            return {
+                "language": language,
+                "pending": {kind: len(items) for kind, items in sources.items()},
+                "translated": translated,
+                "already_localized": already_localized,
+                "projection_records_changed": changed,
+            }
+        except (
+            active_memory.ActiveMemoryError,
+            assistant_services.AssistantServiceError,
+            localized_projection.LocalizedProjectionError,
+            model_gateway.ModelGatewayError,
+        ) as exc:
             raise AssistantError(str(exc)) from exc
 
     def active_memories(
@@ -1372,6 +1473,7 @@ class PersonalAssistant:
             "Do not mention hidden ranking or invent evidence. Return only the "
             "concise response text."
         )
+        system += "\n" + localized_projection.human_output_instruction()
         prompt = json.dumps(
             {
                 "user_query": query.strip(),
@@ -1811,6 +1913,7 @@ class PersonalAssistant:
             "Describe the meaningful outcome, correction, failure, decision, or open loop. "
             "Be compact; do not reproduce the transcript or complete tool payloads."
         )
+        system += "\n" + localized_projection.human_output_instruction()
         prompt = (
             f"Registered Project: {session.cwd}\n"
             f"Codex Session: {session.id}\n\n"
@@ -1858,6 +1961,7 @@ class PersonalAssistant:
             "conclusion must cite a supplied locator. Be compact and do not copy "
             "complete tool payloads."
         )
+        system += "\n" + localized_projection.human_output_instruction()
         prompt_prefix = (
             f"Analysis kind: {analysis_kind}\n"
             f"Codex Session: {source.id}\n"
@@ -1963,6 +2067,7 @@ class PersonalAssistant:
             "or take external action. Judge whether the document is useful, and provide "
             "a compact title and summary when selected."
         )
+        system += "\n" + localized_projection.human_output_instruction()
         prompt = json.dumps(
             {
                 "registered_source": {
@@ -1990,6 +2095,16 @@ class PersonalAssistant:
 
     def _ledger_has(self, event_id: str) -> bool:
         return event_id in self._ledger_event_ids()
+
+    def _localize(
+        self, kind: str, items: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        return localized_projection.localize_items(
+            self.identity.path,
+            localized_projection.configured_language(),
+            kind,
+            items,
+        )
 
     def _ledger_events(self) -> list[dict[str, Any]]:
         try:

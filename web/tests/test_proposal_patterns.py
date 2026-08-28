@@ -15,6 +15,12 @@ from headlong_web.proposals import (
 )
 
 PROJECT_SCOPE = {"kind": "project", "project_id": "project-headlong"}
+WORK_DIRECT_EVIDENCE = (
+    "user_correction",
+    "test_failure",
+    "tool_failure",
+    "reviewer_finding",
+)
 
 
 def _uuid(number: int) -> str:
@@ -129,6 +135,30 @@ def test_work_and_observer_proposals_have_distinct_public_types_and_labels():
         "observer-improvement-proposal",
         "Observer Improvement Proposal",
     )
+
+
+def test_each_direct_work_evidence_kind_qualifies():
+    qualifying = []
+    for offset, kind in enumerate(WORK_DIRECT_EVIDENCE, start=1):
+        qualifying.extend(
+            direct_proposal_events(
+                _analysis(
+                    offset,
+                    kind=kind,
+                    content=f"Concrete work evidence: {kind}.",
+                )
+            )
+        )
+    assert {item["evidence_kind"] for item in qualifying} == set(
+        WORK_DIRECT_EVIDENCE
+    )
+    unsupported = [
+        _analysis(10, kind="self_evaluation"),
+        _analysis(11, kind="design_preference"),
+        _analysis(12, kind="open_loop"),
+    ]
+    assert all(direct_proposal_events(analysis) == [] for analysis in unsupported)
+    assert inferred_pattern_proposal_events(unsupported) == []
 
 
 def test_concrete_observer_evidence_qualifies_but_opinion_does_not():

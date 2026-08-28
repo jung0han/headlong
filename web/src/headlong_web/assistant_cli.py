@@ -209,6 +209,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     commands.add_parser("status", help="show bounded Personal Assistant health")
 
+    localize = commands.add_parser(
+        "localize-pending", help="translate unresolved review items"
+    )
+    localize.add_argument("--language", choices=("en", "ko"), default="ko")
+
     evidence = commands.add_parser("resolve-evidence", help="resolve a v1 Evidence Locator")
     evidence.add_argument("locator")
     _source_root_args(evidence)
@@ -413,6 +418,8 @@ def run(
             result = {"status": "stopped", "bridge": "web"}
         elif args.command == "status":
             result = assistant_runtime.public_health(root, identity)
+        elif args.command == "localize-pending":
+            result = assistant.localize_pending(args.language)
         else:
             locator = EvidenceLocator.decode(args.locator)
             raw = assistant.resolve_evidence(

@@ -37,7 +37,8 @@ load_env_defaults() {
     [[ -f "$envfile" ]] || return 0
     while IFS= read -r key; do
         [[ -n "$key" && -z "${!key+x}" ]] || continue
-        # shellcheck disable=SC1090 -- same trusted operator config as llm/shellm
+        # Same trusted operator config as llm/shellm.
+        # shellcheck disable=SC1090
         value=$(set -a; . "$envfile" 2>/dev/null; printf '%s' "${!key}") || continue
         export "$key=$value"
     done < <(sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}\([A-Za-z_][A-Za-z0-9_]*\)[[:space:]]*=.*/\2/p' "$envfile")

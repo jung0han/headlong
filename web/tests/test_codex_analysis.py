@@ -201,6 +201,7 @@ def test_provisional_final_and_later_revision_are_timed_and_append_only(
     assistant = _assistant(root, clock)
     with FakeLiteLLM() as model:
         _configure_model(monkeypatch, model, tmp_path)
+        monkeypatch.setenv("HEADLONG_ASSISTANT_LANGUAGE", "ko")
         first = assistant.process_codex_once(active, archived)
         assert first["analysis"]["waiting"] == 1
         assert first["analysis"]["provisional"] == 0
@@ -211,6 +212,9 @@ def test_provisional_final_and_later_revision_are_timed_and_append_only(
         clock.advance(seconds=1)
         assert assistant.analyze_codex_once(active, archived)["provisional"] == 1
         assert len(model.calls) == 1
+        assert "Write all human-readable fields in Korean" in model.calls[0][
+            "messages"
+        ][0]["content"]
         response_format = model.calls[0]["response_format"]
         assert response_format["type"] == "json_schema"
         assert response_format["json_schema"]["name"] == "codex_session_analysis"

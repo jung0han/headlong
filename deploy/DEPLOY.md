@@ -123,6 +123,7 @@ Host-only source paths and cycle intervals belong in
 
 ```bash
 CODEX_HOME=/home/operator/.codex
+HEADLONG_ASSISTANT_LANGUAGE=ko
 HEADLONG_CODEX_BRIDGE_INTERVAL_SECONDS=10
 HEADLONG_WEB_BRIDGE_INTERVAL_SECONDS=900
 HEADLONG_ASSISTANT_STORAGE_LIMIT_BYTES=1000000000
@@ -215,6 +216,10 @@ headlong-assistant --identity observer native-memory rebuild
 
 # Restore one previously forgotten native memory by stable id.
 headlong-assistant --identity observer native-memory restore MEMORY_ID
+
+# Translate unresolved proposals, Archive Candidates, and Memory Candidates.
+# This writes a replaceable view; it never rewrites the Activity Ledger.
+headlong-assistant --identity observer localize-pending --language ko
 
 # Review and authorize an Archive Candidate, retry a failed authorized action,
 # or reverse it through Codex's public interface.
