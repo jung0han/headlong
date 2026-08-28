@@ -179,6 +179,23 @@ Codex and Web bridge failures restart independently and trigger
 failure-open fallback is `/var/tmp/headlong-assistant-alert.log`; the alert
 contains only allowlisted systemd fields, never model or source content.
 
+### Model gateway reliability contract
+
+For a non-streaming OpenAI-compatible route, `bin/llm` relies on
+`LLM_MAX_TIME` rather than curl's byte-rate guard. Such gateways may send only
+sparse whitespace while a long prefill is running; treating that valid
+keepalive as a stalled response abandons work that can remain active behind the
+gateway. The byte-rate guard remains enabled for streaming calls, where emitted
+model data makes it meaningful.
+
+Only one layer should own transient retries. When Headlong retains its bounded
+`LLM_RETRIES`, configure an intermediate gateway deployment with zero retries.
+The gateway's upstream timeout must also expire before `LLM_MAX_TIME`, leaving
+time to return a typed failure instead of continuing work after the Headlong
+caller has disconnected. A process-level health response is insufficient for
+readiness: after changing this route, verify one real non-streaming inference
+and confirm that the model scheduler's waiting queue drains.
+
 Use the public recovery commands rather than editing durable files:
 
 ```bash

@@ -69,10 +69,12 @@ LLM_RETRY_BACKOFF="${LLM_RETRY_BACKOFF:-1}"   # seconds; grows linearly per atte
 
 # Network guards: without these a stalled provider stream hangs the caller
 # indefinitely — the retry logic above only fires once curl RETURNS. The
-# speed pair aborts a transfer that stays under LLM_SPEED_LIMIT bytes/s for
-# LLM_SPEED_TIME consecutive seconds: healthy generation streams orders of
-# magnitude faster, while a stream carrying only provider keepalive comments
-# for a whole minute is stuck. Each is 0 to disable.
+# speed pair aborts a streamed transfer that stays under LLM_SPEED_LIMIT
+# bytes/s for LLM_SPEED_TIME consecutive seconds: healthy generation streams
+# orders of magnitude faster, while a stream carrying only provider keepalive
+# comments for a whole minute is stuck. Non-streaming providers may legitimately
+# send only sparse whitespace keepalives until the final JSON body, so the speed
+# guard must not be applied to that path. Each is 0 to disable.
 LLM_CONNECT_TIMEOUT="${LLM_CONNECT_TIMEOUT:-10}"
 LLM_MAX_TIME="${LLM_MAX_TIME:-600}"
 LLM_SPEED_LIMIT="${LLM_SPEED_LIMIT:-100}"
@@ -234,9 +236,11 @@ Environment:
                            0 disables)
   LLM_MAX_TIME             Hard ceiling on one HTTP attempt, seconds
                            (default: 600; 0 disables)
-  LLM_SPEED_LIMIT          Abort a transfer slower than this many bytes/s...
+  LLM_SPEED_LIMIT          Abort a streamed transfer slower than this many
+                           bytes/s...
   LLM_SPEED_TIME           ...for this many consecutive seconds (defaults:
-                           100 bytes/s over 60s; 0 on either disables)
+                           100 bytes/s over 60s; 0 on either disables). The
+                           low-speed guard does not apply to --no-stream.
 
 Examples:
   llm -m claude-sonnet-4-5-20250929 "explain quicksort"
@@ -1051,9 +1055,10 @@ _net_args=()
     && _net_args+=(--connect-timeout "$LLM_CONNECT_TIMEOUT")
 [[ "$LLM_MAX_TIME" =~ ^[0-9]+$ && "$LLM_MAX_TIME" -gt 0 ]] \
     && _net_args+=(--max-time "$LLM_MAX_TIME")
+_stream_net_args=("${_net_args[@]}")
 if [[ "$LLM_SPEED_LIMIT" =~ ^[0-9]+$ && "$LLM_SPEED_LIMIT" -gt 0 \
       && "$LLM_SPEED_TIME" =~ ^[0-9]+$ && "$LLM_SPEED_TIME" -gt 0 ]]; then
-    _net_args+=(--speed-limit "$LLM_SPEED_LIMIT" --speed-time "$LLM_SPEED_TIME")
+    _stream_net_args+=(--speed-limit "$LLM_SPEED_LIMIT" --speed-time "$LLM_SPEED_TIME")
 fi
 
 if [[ "$LLM_STREAM" -eq 1 ]]; then
@@ -1070,7 +1075,7 @@ if [[ "$LLM_STREAM" -eq 1 ]]; then
         LLM_RETRY_ERR=$(mktemp)
         LLM_DATA_MARKER="${LLM_RETRY_ERR}.emitted"
         _rc=0
-        ( "stream_${LLM_PROVIDER}" < <(curl -sS -N ${_net_args[@]+"${_net_args[@]}"} "${headers[@]}" -d @"$payload_file" "$url" 2>"$_curl_err") ) || _rc=$?
+        ( "stream_${LLM_PROVIDER}" < <(curl -sS -N ${_stream_net_args[@]+"${_stream_net_args[@]}"} "${headers[@]}" -d @"$payload_file" "$url" 2>"$_curl_err") ) || _rc=$?
 
         _emitted=0
         [[ -e "$LLM_DATA_MARKER" ]] && _emitted=1
