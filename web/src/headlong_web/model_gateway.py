@@ -240,6 +240,13 @@ def _route_failure_code(detail: str) -> str:
     )
     if any(marker in normalized for marker in transport_markers):
         return "transport"
+    rate_limit_markers = (
+        "api error (http 429)",
+        "rate limit",
+        "too many requests",
+    )
+    if any(marker in normalized for marker in rate_limit_markers):
+        return "rate_limited"
     configuration_markers = (
         "api error (http 401)",
         "api error (http 403)",

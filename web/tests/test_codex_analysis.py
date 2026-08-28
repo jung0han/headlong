@@ -359,8 +359,13 @@ def test_model_failure_keeps_cursor_and_final_marker_retriable(
     [
         (401, "invalid API key: secret provider detail", "configuration"),
         (400, "maximum context length exceeded", "context_rejected"),
+        (
+            429,
+            "Rate limit exceeded for api_key: opaque provider detail",
+            "rate_limited",
+        ),
     ],
-    ids=("authentication", "context"),
+    ids=("authentication", "context", "rate-limit"),
 )
 def test_model_route_failure_is_safely_classified(
     tmp_path: Path, monkeypatch, capsys, status, message, expected
