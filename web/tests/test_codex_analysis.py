@@ -34,6 +34,8 @@ class FakeLiteLLM:
     def __init__(self):
         self.calls: list[dict] = []
         self.fail = False
+        self.fail_status = 500
+        self.fail_message = "temporary route failure"
         self.responses: list[tuple[object, str]] = []
         owner = self
 
@@ -45,8 +47,10 @@ class FakeLiteLLM:
                 body = json.loads(self.rfile.read(int(self.headers["content-length"])))
                 owner.calls.append(body)
                 if owner.fail:
-                    payload = b'{"error":{"message":"temporary route failure"}}'
-                    self.send_response(500)
+                    payload = json.dumps(
+                        {"error": {"message": owner.fail_message}}
+                    ).encode()
+                    self.send_response(owner.fail_status)
                 else:
                     prompt = body["messages"][-1]["content"]
                     locators = [
@@ -313,6 +317,7 @@ def test_model_failure_keeps_cursor_and_final_marker_retriable(
         state_path = identity / "assistant" / "analysis" / "codex" / f"{SESSION_ID}.json"
         failed_state = json.loads(state_path.read_text())
         assert failed_state["status"] == "failed"
+        assert failed_state["last_error"] == "route_failure"
         assert failed_state["final_event_id"] is None
         assert not any(
             event.get("analysis_state") == "final" for event in _events(identity)
@@ -323,6 +328,15 @@ def test_model_failure_keeps_cursor_and_final_marker_retriable(
         )
         assert health["status"] == "degraded"
         assert health["analysis"]["sessions"][0]["status"] == "failed"
+        structured = json.loads(
+            (
+                identity
+                / "assistant"
+                / "source-health"
+                / "structured-results.json"
+            ).read_text()
+        )
+        assert structured["last_error"] == "route_failure"
 
         model.fail = False
         retried = assistant.analyze_codex_once(active, archived)
@@ -338,6 +352,85 @@ def test_model_failure_keeps_cursor_and_final_marker_retriable(
             event for event in _events(identity) if event.get("analysis_state") == "failed"
         )
         assert failed["event_id"] in final["supersedes_event_ids"]
+
+
+@pytest.mark.parametrize(
+    ("status", "message", "expected"),
+    [
+        (401, "invalid API key: secret provider detail", "configuration"),
+        (400, "maximum context length exceeded", "context_rejected"),
+    ],
+    ids=("authentication", "context"),
+)
+def test_model_route_failure_is_safely_classified(
+    tmp_path: Path, monkeypatch, capsys, status, message, expected
+):
+    identity, active, archived, assistant = _archived_assistant(tmp_path, capsys)
+    with FakeLiteLLM() as model:
+        _configure_model(monkeypatch, model, tmp_path)
+        model.fail = True
+        model.fail_status = status
+        model.fail_message = message
+        result = assistant.process_codex_once(active, archived)
+
+    assert result["analysis"]["failed"] == 1
+    state = json.loads(
+        (
+            identity
+            / "assistant"
+            / "analysis"
+            / "codex"
+            / f"{SESSION_ID}.json"
+        ).read_text()
+    )
+    assert state["last_error"] == expected
+    structured = json.loads(
+        (
+            identity
+            / "assistant"
+            / "source-health"
+            / "structured-results.json"
+        ).read_text()
+    )
+    assert structured["last_error"] == expected
+    assert message not in json.dumps(structured)
+
+
+def test_model_transport_failure_is_safely_classified(
+    tmp_path: Path, monkeypatch, capsys
+):
+    identity, active, archived, assistant = _archived_assistant(tmp_path, capsys)
+    monkeypatch.setenv("HEADLONG_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("SHELLM_MODEL", "deepseek-flash-v4-private")
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-test-key")
+    monkeypatch.setenv("LLM_RETRIES", "0")
+    monkeypatch.setenv("LLM_CONNECT_TIMEOUT", "1")
+    monkeypatch.setenv("LLM_MAX_TIME", "1")
+    monkeypatch.setenv("LLM_API_URL", "http://127.0.0.1:1/v1/chat/completions")
+
+    result = assistant.process_codex_once(active, archived)
+
+    assert result["analysis"]["failed"] == 1
+    state = json.loads(
+        (
+            identity
+            / "assistant"
+            / "analysis"
+            / "codex"
+            / f"{SESSION_ID}.json"
+        ).read_text()
+    )
+    assert state["last_error"] == "transport"
+    structured = json.loads(
+        (
+            identity
+            / "assistant"
+            / "source-health"
+            / "structured-results.json"
+        ).read_text()
+    )
+    assert structured["last_error"] == "transport"
 
 
 def test_json_object_fallback_recovers_after_one_invalid_result(
@@ -374,6 +467,73 @@ def test_json_object_fallback_recovers_after_one_invalid_result(
     assert len(model.calls) == 2
     assert all(call["response_format"] == {"type": "json_object"} for call in model.calls)
     assert any(event.get("analysis_state") == "final" for event in _events(identity))
+
+
+def test_large_session_analysis_is_bounded_and_keeps_latest_evidence(
+    tmp_path: Path, monkeypatch, capsys
+):
+    root = tmp_path / "headlong"
+    root.mkdir()
+    identity = _identity(root)
+    project = tmp_path / "project"
+    project.mkdir()
+    active = tmp_path / "codex" / "sessions"
+    archived = tmp_path / "codex" / "archived_sessions"
+    active.mkdir(parents=True)
+    archived.mkdir(parents=True)
+    session = archived / "large-session.jsonl"
+    rows = [
+        _row(
+            {
+                "type": "session_meta",
+                "payload": {"id": SESSION_ID, "cwd": str(project)},
+            }
+        ),
+        *(
+            _row(
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "agent_message",
+                        "message": f"older-{index}-" + "x" * (64 * 1024),
+                    },
+                }
+            )
+            for index in range(20)
+        ),
+        _row(
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "agent_message",
+                    "message": "Remember the latest bounded-analysis decision.",
+                },
+            }
+        ),
+    ]
+    session.write_bytes(b"".join(rows))
+    assert _command(root, "project", "add", str(project)) == 0
+    capsys.readouterr()
+    assistant = _assistant(
+        root, FakeClock(datetime(2026, 8, 27, 0, 0, tzinfo=timezone.utc))
+    )
+
+    with FakeLiteLLM() as model:
+        _configure_model(monkeypatch, model, tmp_path)
+        result = assistant.process_codex_once(active, archived)
+
+    assert result["analysis"]["final"] == 1
+    prompt = model.calls[0]["messages"][-1]["content"]
+    assert len(prompt.encode()) <= 256 * 1024
+    assert "Remember the latest bounded-analysis decision." in prompt
+    final = next(
+        event for event in _events(identity) if event.get("analysis_state") == "final"
+    )
+    assert final["evidence_locators"][0]["line"] == len(rows)
+    memory_candidate = next(
+        event for event in _events(identity) if event.get("type") == "memory-candidate"
+    )
+    assert memory_candidate["evidence_locators"][0]["line"] == len(rows)
 
 
 def test_json_object_fallback_double_failure_is_observable_without_analysis(

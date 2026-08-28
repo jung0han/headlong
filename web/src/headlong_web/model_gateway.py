@@ -16,6 +16,10 @@ from headlong_web import control, discovery, envfile, operational_health
 class ModelGatewayError(RuntimeError):
     """A model could not run or returned a malformed bounded result."""
 
+    def __init__(self, message: str, *, code: str = "route_failure") -> None:
+        super().__init__(message)
+        self.code = code
+
 
 class ModelResultInvalidError(ModelGatewayError):
     """A provider returned output that cannot be a complete bounded result."""
@@ -71,16 +75,27 @@ class ModelGateway:
                 timeout=600,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise ModelGatewayError(f"{operation} failed to run") from exc
+            raise ModelGatewayError(
+                f"{operation} failed to run", code="transport"
+            ) from exc
         if proc.returncode != 0:
             detail = (proc.stderr or "model call failed").strip().splitlines()[-1]
             if route_args and "structured result truncated" in detail:
-                raise ModelResultInvalidError(f"{operation} failed: {detail}")
-            raise ModelGatewayError(f"{operation} failed: {detail}")
+                raise ModelResultInvalidError(
+                    f"{operation} failed: {detail}", code="truncated"
+                )
+            raise ModelGatewayError(
+                f"{operation} failed: {detail}",
+                code=_route_failure_code(detail),
+            )
         output = proc.stdout.strip()
-        if not output or (max_chars is not None and len(output) > max_chars):
+        if not output:
             raise ModelResultInvalidError(
-                f"{operation} is empty or exceeds compact limits"
+                f"{operation} is empty", code="invalid_json"
+            )
+        if max_chars is not None and len(output) > max_chars:
+            raise ModelResultInvalidError(
+                f"{operation} exceeds compact limits", code="truncated"
             )
         return output
 
@@ -111,6 +126,7 @@ class ModelGateway:
                 route_args = ("--json-object",)
 
             last_error = "did not match the required schema"
+            last_error_code = "schema_shape"
             for attempt in range(attempts):
                 retry_system = system
                 if mode == "json_object":
@@ -137,14 +153,23 @@ class ModelGateway:
                     return validated
                 except json.JSONDecodeError:
                     last_error = "returned invalid JSON"
+                    last_error_code = "invalid_json"
                 except ValueError as exc:
                     last_error = str(exc) or last_error
+                    last_error_code = (
+                        "invalid_locator"
+                        if "unknown Evidence Locator" in last_error
+                        else "schema_shape"
+                    )
                 except ModelResultInvalidError as exc:
                     last_error = str(exc)
-            raise ModelGatewayError(f"{operation} {last_error}")
-        except ModelGatewayError:
+                    last_error_code = exc.code
+            raise ModelGatewayError(
+                f"{operation} {last_error}", code=last_error_code
+            )
+        except ModelGatewayError as exc:
             self._record_structured(
-                mode=mode, success=False, error_code="invalid_result"
+                mode=mode, success=False, error_code=exc.code
             )
             raise
         finally:
@@ -184,16 +209,58 @@ def _structured_mode(env: dict[str, str]) -> str:
     provider = env.get("LLM_PROVIDER", "").strip().lower()
     if provider not in {"openai", "openrouter", "opencode-go"}:
         raise ModelGatewayError(
-            "Structured Model Results require an OpenAI-compatible model route"
+            "Structured Model Results require an OpenAI-compatible model route",
+            code="configuration",
         )
     configured = env.get("LLM_STRUCTURED_OUTPUT_MODE", "").strip().lower()
     if configured in {"strict", "json_object"}:
         return configured
     if configured:
         raise ModelGatewayError(
-            "LLM_STRUCTURED_OUTPUT_MODE must be strict or json_object"
+            "LLM_STRUCTURED_OUTPUT_MODE must be strict or json_object",
+            code="configuration",
         )
     # An OpenAI-compatible wire format does not prove that the routed model
     # implements strict schemas. Stay on the compatibility path until the
     # operator or a capability probe records explicit support.
     return "json_object"
+
+
+def _route_failure_code(detail: str) -> str:
+    normalized = detail.lower()
+    transport_markers = (
+        "api error (http 000)",
+        "curl error:",
+        "connection refused",
+        "could not resolve host",
+        "failed to connect",
+        "network is unreachable",
+        "operation timed out",
+        "connection timed out",
+    )
+    if any(marker in normalized for marker in transport_markers):
+        return "transport"
+    configuration_markers = (
+        "api error (http 401)",
+        "api error (http 403)",
+        "api key",
+        "api_key",
+        "authentication",
+        "unauthorized",
+        "forbidden",
+        "permission denied",
+        "not set",
+    )
+    if any(marker in normalized for marker in configuration_markers):
+        return "configuration"
+    context_markers = (
+        "context length",
+        "context window",
+        "maximum context",
+        "max context",
+        "too many tokens",
+        "prompt is too long",
+    )
+    if any(marker in normalized for marker in context_markers):
+        return "context_rejected"
+    return "route_failure"

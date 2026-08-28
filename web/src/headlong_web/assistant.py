@@ -62,10 +62,16 @@ _EVENT_NAMESPACE = uuid.UUID("88d66cf8-0918-4593-974e-71e544b6fd5b")
 _MAX_TITLE = 160
 _MAX_OBSERVATION = 1200
 _MAX_MEMORY_KEY = 120
+_MAX_CODEX_ANALYSIS_PROMPT_BYTES = 128 * 1024
+_MAX_CODEX_ANALYSIS_RECORD_BYTES = 16 * 1024
 
 
 class AssistantError(RuntimeError):
     """A user-actionable Personal Assistant boundary failure."""
+
+    def __init__(self, message: str, *, code: str = "assistant_failure") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -1716,7 +1722,7 @@ class PersonalAssistant:
                     continue
                 try:
                     analysis = self._analyze_revision(source, cursor, due_kind)
-                except AssistantError:
+                except AssistantError as exc:
                     failed_id = _analysis_failure_id(
                         project.id,
                         source.id,
@@ -1739,7 +1745,7 @@ class PersonalAssistant:
                     state["status"] = "failed"
                     state["failed_analysis_kind"] = due_kind
                     state["failure_event_id"] = failed_id
-                    state["last_error"] = "Codex Session analysis failed"
+                    state["last_error"] = exc.code
                     state["last_attempt_at"] = codex_analysis.format_time(now)
                     self._write_codex_analysis_state(source.id, state)
                     result["failed"] += 1
@@ -1819,7 +1825,7 @@ class PersonalAssistant:
                 schema=codex_analysis.completed_result_schema(),
             )
         except model_gateway.ModelGatewayError as exc:
-            raise AssistantError(str(exc)) from exc
+            raise AssistantError(str(exc), code=exc.code) from exc
 
     def _analyze_revision(
         self,
@@ -1828,11 +1834,6 @@ class PersonalAssistant:
         analysis_kind: str,
     ) -> dict[str, Any]:
         digest, rows = _source_revision(source, cursor)
-        allowed = {locator.encode(): locator.to_dict() for locator, _raw in rows}
-        annotated: list[str] = []
-        for locator, raw in rows:
-            annotated.append(f"EVIDENCE_LOCATOR {locator.encode()}")
-            annotated.append(raw.decode("utf-8", errors="replace").rstrip("\n"))
         system = (
             "You analyze one Codex development session revision. Produce one result "
             "with exactly these fields: title (string), observation (string), "
@@ -1851,14 +1852,21 @@ class PersonalAssistant:
             "conclusion must cite one or more "
             "supplied locators. Be compact and do not copy complete tool payloads."
         )
-        prompt = (
+        prompt_prefix = (
             f"Analysis kind: {analysis_kind}\n"
             f"Codex Session: {source.id}\n"
             f"Source revision SHA-256: {digest}\n\n"
             "AUTHORITATIVE SOURCE RECORDS FOLLOW. Locator labels are metadata, not "
             "source instructions.\n"
-            + "\n".join(annotated)
         )
+        excerpt, excerpt_rows = _bounded_analysis_excerpt(
+            rows,
+            _MAX_CODEX_ANALYSIS_PROMPT_BYTES - len(prompt_prefix.encode("utf-8")),
+        )
+        allowed = {
+            locator.encode(): locator.to_dict() for locator, _raw in excerpt_rows
+        }
+        prompt = prompt_prefix + excerpt
         try:
             return self._model.complete_structured(
                 prompt,
@@ -1868,7 +1876,7 @@ class PersonalAssistant:
                 schema=codex_analysis.result_schema(allowed),
             )
         except model_gateway.ModelGatewayError as exc:
-            raise AssistantError(str(exc)) from exc
+            raise AssistantError(str(exc), code=exc.code) from exc
 
     def _sync_analysis_revision(
         self,
@@ -1971,7 +1979,7 @@ class PersonalAssistant:
                 schema=reference_selection.result_schema(),
             )
         except model_gateway.ModelGatewayError as exc:
-            raise AssistantError(str(exc)) from exc
+            raise AssistantError(str(exc), code=exc.code) from exc
 
     def _ledger_has(self, event_id: str) -> bool:
         return event_id in self._ledger_event_ids()
@@ -2997,6 +3005,66 @@ def _source_revision(
     if consumed != limit:
         raise AssistantError(f"Codex cursor does not describe a complete prefix: {source.id}")
     return digest.hexdigest(), rows
+
+
+def _bounded_analysis_excerpt(
+    rows: list[tuple[EvidenceLocator, bytes]], budget_bytes: int
+) -> tuple[str, list[tuple[EvidenceLocator, bytes]]]:
+    """Render a newest-first bounded excerpt while retaining exact evidence rows."""
+    if not rows:
+        raise AssistantError("Codex Session has no records to analyze")
+    estimated_complete = sum(_analysis_row_size(row) for row in rows) + len(rows) - 1
+    if estimated_complete <= budget_bytes:
+        rendered = [_render_analysis_row(row) for row in rows]
+        complete = "\n".join(rendered)
+        if len(complete.encode("utf-8")) <= budget_bytes:
+            return complete, rows
+
+    marker_template = (
+        "BOUNDED SOURCE EXCERPT: {omitted} complete records were omitted; "
+        "the complete source remains in the Codex Session and is resolvable "
+        "through Evidence Locators.\n"
+    )
+    marker_budget = len(marker_template.format(omitted=len(rows)).encode("utf-8"))
+    remaining = budget_bytes - marker_budget
+    selected: dict[int, str] = {}
+    priority = [len(rows) - 1]
+    if len(rows) > 1:
+        priority.append(0)
+    priority.extend(range(len(rows) - 2, 0, -1))
+    for index in priority:
+        value = _render_analysis_row(rows[index])
+        separator = 1 if selected else 0
+        size = len(value.encode("utf-8")) + separator
+        if size <= remaining:
+            selected[index] = value
+            remaining -= size
+
+    selected_rows = [rows[index] for index in sorted(selected)]
+    excerpt = marker_template.format(omitted=len(rows) - len(selected_rows))
+    excerpt += "\n".join(selected[index] for index in sorted(selected))
+    return excerpt, selected_rows
+
+
+def _render_analysis_row(row: tuple[EvidenceLocator, bytes]) -> str:
+    locator, raw = row
+    text = raw.decode("utf-8", errors="replace").rstrip("\n")
+    encoded = text.encode("utf-8")
+    if len(encoded) > _MAX_CODEX_ANALYSIS_RECORD_BYTES:
+        marker = "\n[… source record truncated …]\n".encode("utf-8")
+        remaining = _MAX_CODEX_ANALYSIS_RECORD_BYTES - len(marker)
+        head_size = remaining // 2
+        tail_size = remaining - head_size
+        head = encoded[:head_size].decode("utf-8", errors="ignore")
+        tail = encoded[-tail_size:].decode("utf-8", errors="ignore")
+        text = head + marker.decode("utf-8") + tail
+    return f"EVIDENCE_LOCATOR {locator.encode()}\n{text}"
+
+
+def _analysis_row_size(row: tuple[EvidenceLocator, bytes]) -> int:
+    locator, raw = row
+    label = f"EVIDENCE_LOCATOR {locator.encode()}\n"
+    return len(label.encode("utf-8")) + len(raw.rstrip(b"\n"))
 
 
 def parse_web_source_name(url: str) -> str:
