@@ -109,6 +109,11 @@ check "web and bridges cannot directly mutate configured Codex state" \
         _ "$REPO/deploy/headlong-web.service" \
         "$REPO/deploy/headlong-assistant-codex@.service" \
         "$REPO/deploy/headlong-assistant-web@.service"
+check "dashboard and bridges share the assistant language configuration" \
+    bash -c 'for unit in "$@"; do grep -q "^EnvironmentFile=-/etc/headlong/assistant.env$" "$unit" || exit 1; done' \
+        _ "$REPO/deploy/headlong-web.service" \
+        "$REPO/deploy/headlong-assistant-codex@.service" \
+        "$REPO/deploy/headlong-assistant-web@.service"
 check "proposal-only shell actor keeps identity-local native learning authority" \
     bash -c 'grep -q "HEADLONG_PROPOSAL_ONLY" "$1" && grep -q "proposal-only Observer requires a container" "$2"' \
         _ "$REPO/thinkers/_lib/common.sh" "$REPO/thinkers/monolith/step"

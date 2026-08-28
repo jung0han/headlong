@@ -21,6 +21,8 @@ Type=simple
 User=shellm
 WorkingDirectory=@SHELLM_HOME@/app
 Environment="PATH=@SHELLM_HOME@/.local/bin:@SHELLM_HOME@/.bun/bin:/usr/local/bin:/usr/bin:/bin"
+# Share host-specific assistant presentation settings with the dashboard API.
+EnvironmentFile=-/etc/headlong/assistant.env
 # Lock CORS to your public hostname once the tunnel is up:
 #Environment="HEADLONG_WEB_ALLOWED_ORIGINS=https://agents.example.com"
 # For a view-only deployment (no start/stop/chat/config mutations):
