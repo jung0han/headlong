@@ -13,6 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from headlong_web import assistant as assistant_module
+from headlong_web import discovery
 from headlong_web import references
 from headlong_web.assistant_cli import run
 from headlong_web.server import create_app
@@ -138,6 +139,73 @@ def _command(root: Path, *args: str) -> int:
 
 def _public_dns(*_args, **_kwargs):
     return [(2, 1, 6, "", ("93.184.216.34", 443))]
+
+
+def test_web_selection_does_not_block_other_assistant_state_work(
+    tmp_path: Path, monkeypatch
+):
+    root = tmp_path / "headlong"
+    root.mkdir()
+    _identity(root)
+    identity = discovery.scan_identities(root)[0]
+    service = assistant_module.PersonalAssistant(root, identity)
+    url = "https://example.com/slow-selection"
+    service.add_web_source(url)
+    project = tmp_path / "registered-project"
+    project.mkdir()
+    monkeypatch.setattr(
+        references,
+        "fetch_public_document",
+        lambda _url: references.FetchedDocument(
+            url, "text/plain", "a document whose selection is still in flight"
+        ),
+    )
+    selection_started = threading.Event()
+    release_selection = threading.Event()
+    mutation_done = threading.Event()
+    failures: list[BaseException] = []
+
+    def slow_selection(_source, _document):
+        selection_started.set()
+        if not release_selection.wait(timeout=5):
+            raise AssertionError("test did not release the blocked selection")
+        return {
+            "selected": True,
+            "title": "Slow selection",
+            "summary": "The selection eventually completed.",
+        }
+
+    monkeypatch.setattr(service, "_select_reference", slow_selection)
+
+    def observe() -> None:
+        try:
+            service.observe_web_once()
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            failures.append(exc)
+
+    def mutate() -> None:
+        try:
+            service.add_project(project)
+            mutation_done.set()
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            failures.append(exc)
+
+    observer = threading.Thread(target=observe)
+    mutator = threading.Thread(target=mutate)
+    observer.start()
+    assert selection_started.wait(timeout=2)
+    mutator.start()
+    try:
+        assert mutation_done.wait(timeout=1), (
+            "external Reference selection held the global assistant state lock"
+        )
+    finally:
+        release_selection.set()
+        observer.join(timeout=5)
+        mutator.join(timeout=5)
+    assert not observer.is_alive()
+    assert not mutator.is_alive()
+    assert failures == []
 
 
 def test_registered_web_source_becomes_one_immutable_public_reference(

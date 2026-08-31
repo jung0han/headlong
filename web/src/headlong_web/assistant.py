@@ -418,27 +418,26 @@ class PersonalAssistant:
             "failed": 0,
             "failures": [],
         }
-        # One identity-local lock keeps registrations, model cost, immutable
-        # storage, event repair, and dedupe in one deterministic boundary.
-        with self._state_lock():
-            sources = self.web_sources()
-            result["registered"] = len(sources)
-            for source in sources:
-                attempted_at = _utc_now()
-                if source.kind == "hacker_news":
-                    try:
-                        collection = hacker_news.collect(
-                            fetch=references.fetch_public_document
-                        )
-                    except references.ReferenceError as exc:
+        sources = self.web_sources()
+        result["registered"] = len(sources)
+        for source in sources:
+            attempted_at = _utc_now()
+            if source.kind == "hacker_news":
+                try:
+                    collection = hacker_news.collect(
+                        fetch=references.fetch_public_document
+                    )
+                except references.ReferenceError as exc:
+                    with self._state_lock():
                         self._record_web_failure(
                             source, attempted_at, "hacker_news", exc.code, result
                         )
-                        continue
-                    result["fetched"] += len(collection.documents)
-                    result["duplicate"] += collection.duplicates
-                    failures_before = result["failed"]
-                    for failure in collection.failures:
+                    continue
+                result["fetched"] += len(collection.documents)
+                result["duplicate"] += collection.duplicates
+                failures_before = result["failed"]
+                for failure in collection.failures:
+                    with self._state_lock():
                         self._record_web_failure(
                             source,
                             attempted_at,
@@ -447,14 +446,17 @@ class PersonalAssistant:
                             result,
                             write_health=False,
                         )
-                    for document in collection.documents:
-                        self._consider_web_document(
-                            source,
-                            document,
-                            attempted_at,
-                            result,
-                            write_health=False,
-                        )
+                for document in collection.documents:
+                    self._consider_web_document(
+                        source,
+                        document,
+                        attempted_at,
+                        result,
+                        write_health=False,
+                    )
+                with self._state_lock():
+                    if not self._web_source_is_registered(source):
+                        continue
                     if result["failed"] > failures_before:
                         self._write_web_health(
                             source,
@@ -469,21 +471,27 @@ class PersonalAssistant:
                         self._record_web_success(
                             source, attempted_at, collection.digest, result
                         )
-                    continue
-                try:
-                    document = references.fetch_public_document(source.url)
-                except references.ReferenceError as exc:
+                continue
+            try:
+                document = references.fetch_public_document(source.url)
+            except references.ReferenceError as exc:
+                with self._state_lock():
+                    if not self._web_source_is_registered(source):
+                        continue
                     self._record_web_failure(
                         source, attempted_at, "fetch", exc.code, result
                     )
-                    continue
-                result["fetched"] += 1
-                if source.kind == "rss" and document.media_type not in {
-                    "application/rss+xml",
-                    "application/atom+xml",
-                    "application/xml",
-                    "text/xml",
-                }:
+                continue
+            result["fetched"] += 1
+            if source.kind == "rss" and document.media_type not in {
+                "application/rss+xml",
+                "application/atom+xml",
+                "application/xml",
+                "text/xml",
+            }:
+                with self._state_lock():
+                    if not self._web_source_is_registered(source):
+                        continue
                     self._record_web_failure(
                         source,
                         attempted_at,
@@ -491,8 +499,8 @@ class PersonalAssistant:
                         "rss_content_type_mismatch",
                         result,
                     )
-                    continue
-                self._consider_web_document(source, document, attempted_at, result)
+                continue
+            self._consider_web_document(source, document, attempted_at, result)
         return result
 
     def explore_web_once(
@@ -684,6 +692,59 @@ class PersonalAssistant:
         write_health: bool = True,
     ) -> None:
         """Apply the shared selection and immutable-store boundary to one document."""
+        with self._state_lock():
+            if not self._web_source_is_registered(source):
+                return
+            if self._record_existing_web_document(
+                source, document, attempted_at, result, write_health=write_health
+            ):
+                return
+        selection_source = RegisteredWebSource(
+            references.source_id(document.source_url),
+            source.name,
+            document.source_url,
+            source.kind,
+        )
+        try:
+            selection = self._select_reference(selection_source, document)
+        except AssistantError:
+            with self._state_lock():
+                if self._web_source_is_registered(source):
+                    self._record_web_failure(
+                        source,
+                        attempted_at,
+                        "selection",
+                        "selection_failed",
+                        result,
+                        write_health=write_health,
+                    )
+            return
+        with self._state_lock():
+            if not self._web_source_is_registered(source):
+                return
+            if self._record_existing_web_document(
+                source, document, attempted_at, result, write_health=write_health
+            ):
+                return
+            self._commit_web_selection(
+                source,
+                document,
+                attempted_at,
+                result,
+                selection,
+                write_health=write_health,
+            )
+
+    def _record_existing_web_document(
+        self,
+        source: RegisteredWebSource,
+        document: references.FetchedDocument,
+        attempted_at: str,
+        result: dict[str, Any],
+        *,
+        write_health: bool,
+    ) -> bool:
+        """Repair and count an already committed document while state is locked."""
         document_source_id = references.source_id(document.source_url)
         try:
             existing = references.read_reference(
@@ -697,7 +758,7 @@ class PersonalAssistant:
                 source, attempted_at, "storage", exc.code, result,
                 write_health=write_health,
             )
-            return
+            return True
         if existing is not None:
             event = reference_revision_event(existing)
             try:
@@ -708,11 +769,11 @@ class PersonalAssistant:
                     source, attempted_at, "ledger", "ledger_failed", result,
                     write_health=write_health,
                 )
-                return
+                return True
             result["duplicate"] += 1
             if write_health:
                 self._record_web_success(source, attempted_at, document.digest, result)
-            return
+            return True
         try:
             rejected = references.read_rejection(
                 self.identity.path, document_source_id, document.digest
@@ -722,7 +783,7 @@ class PersonalAssistant:
                 source, attempted_at, "storage", exc.code, result,
                 write_health=write_health,
             )
-            return
+            return True
         if rejected is not None:
             event = reference_rejection_event(rejected)
             try:
@@ -733,23 +794,25 @@ class PersonalAssistant:
                     source, attempted_at, "ledger", "ledger_failed", result,
                     write_health=write_health,
                 )
-                return
+                return True
             result["duplicate"] += 1
             result["not_selected"] += 1
             if write_health:
                 self._record_web_success(source, attempted_at, document.digest, result)
-            return
-        selection_source = RegisteredWebSource(
-            document_source_id, source.name, document.source_url, source.kind
-        )
-        try:
-            selection = self._select_reference(selection_source, document)
-        except AssistantError:
-            self._record_web_failure(
-                source, attempted_at, "selection", "selection_failed", result,
-                write_health=write_health,
-            )
-            return
+            return True
+        return False
+
+    def _commit_web_selection(
+        self,
+        source: RegisteredWebSource,
+        document: references.FetchedDocument,
+        attempted_at: str,
+        result: dict[str, Any],
+        selection: dict[str, Any],
+        *,
+        write_health: bool,
+    ) -> None:
+        """Persist one completed selection while state is locked."""
         if not selection["selected"]:
             judgment = str(
                 selection["summary"]
@@ -813,6 +876,10 @@ class PersonalAssistant:
         result["saved" if created else "duplicate"] += 1
         if write_health:
             self._record_web_success(source, attempted_at, document.digest, result)
+
+    def _web_source_is_registered(self, source: RegisteredWebSource) -> bool:
+        """Revalidate the source snapshot before a durable web-side effect."""
+        return any(current == source for current in self.web_sources())
 
     def web_source_health(self) -> list[dict[str, Any]]:
         try:
