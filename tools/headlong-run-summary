@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ "${1:-}" == --help ]] && { echo "usage: headlong-run-summary TRAJ_DIR TRAJ_ID RUN_STEP_ID PROMPT STDIN_FILE [FILES...]"; exit 0; }
+
+traj_dir="${1:?trajectory directory required}" traj_id="${2:?trajectory id required}"
+run_step_id="${3:?run step id required}" prompt="$4" stdin_file="$5"
+shift 5; file_paths=("$@")
+
+summary_model="${SHELLM_SUMMARY_MODEL:-${SHELLM_FAST_MODEL:-}}"
+if [[ -z "$summary_model" ]]; then
+    case "$SHELLM_MODEL" in claude-*) summary_model="claude-haiku-4-5-20251001" ;; *) summary_model="$SHELLM_MODEL" ;; esac
+fi
+
+max_ctx=20000; combined="CLI argument: ${prompt:0:$max_ctx}"
+if [[ -n "$stdin_file" && -f "$stdin_file" ]]; then
+    stdin_content=$(cat "$stdin_file"); avail=$((max_ctx - ${#combined}))
+    (( avail <= 0 )) || combined+=$'\n\nstdin:\n'"${stdin_content:0:$avail}"
+fi
+for file in "${file_paths[@]+"${file_paths[@]}"}"; do
+    [[ -f "$file" ]] || continue
+    avail=$((max_ctx - ${#combined})); (( avail > 0 )) || break
+    content=$(head -c "$avail" "$file" 2>/dev/null || true)
+    combined+=$'\n\nFile '"${file}"$':\n'"${content}"
+done
+
+prompt_text="Analyze the context and goal of this shellm run. Give a one-line tldr. Include a multi-paragraph full_summary when the inputs exceed 1000 characters; otherwise use null.
+
+Inputs (${#combined} characters):
+${combined}"
+messages=$(printf '%s' "$prompt_text" | jq -Rs '[{"role":"user","content":.}]')
+schema='{"type":"object","additionalProperties":false,"properties":{"tldr":{"type":"string","minLength":1,"maxLength":1000},"full_summary":{"type":["string","null"],"maxLength":16000}},"required":["tldr","full_summary"]}'
+if ! result=$(llm -m "$summary_model" -t 2048 -s "You produce concise run summaries." -M "$messages" \
+    --structured-result shellm_run_summary "$schema"); then
+    echo "shellm: run summary generation failed schema validation" >&2
+    exit 0
+fi
+
+tldr=$(printf '%s' "$result" | jq -r '.tldr')
+full=$(printf '%s' "$result" | jq -r 'if .full_summary == null then "" else .full_summary end')
+jq -nc --arg tldr "$tldr" --arg full "$full" --arg run_id "$run_step_id" --arg model "$summary_model" \
+    '{type:"run-summary", tldr:$tldr, full_summary:$full, run_id:$run_id, model:$model}' \
+    | traj append --traj_dir "$traj_dir" "$traj_id" >/dev/null 2>/dev/null || true

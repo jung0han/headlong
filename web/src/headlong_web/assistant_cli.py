@@ -8,7 +8,7 @@ import os
 import sys
 from pathlib import Path
 
-from headlong_web import assistant_runtime, web_exploration
+from headlong_web import archive_execution, assistant_runtime, web_exploration
 from headlong_web.assistant import (
     AssistantError,
     EvidenceLocator,
@@ -86,6 +86,76 @@ def build_parser() -> argparse.ArgumentParser:
     _memory_authority_args(accept)
     memory_commands.add_parser("rebuild")
 
+    native_memory = commands.add_parser(
+        "native-memory", help="recover native HeadLong Memory"
+    )
+    native_memory_commands = native_memory.add_subparsers(
+        dest="native_memory_command", required=True
+    )
+    native_memory_commands.add_parser("rebuild")
+    restore_native_memory = native_memory_commands.add_parser("restore")
+    restore_native_memory.add_argument("memory_id")
+
+    memory_failure = commands.add_parser(
+        "memory-failure", help="record and inspect observed Memory Failures"
+    )
+    memory_failure_commands = memory_failure.add_subparsers(
+        dest="memory_failure_command", required=True
+    )
+    memory_failure_commands.add_parser("list")
+    memory_failure_commands.add_parser("health")
+    memory_failure_commands.add_parser("quality")
+    report_failure = memory_failure_commands.add_parser("report")
+    report_failure.add_argument("memory_event_id")
+    report_failure.add_argument(
+        "--classification",
+        choices=(
+            "wrong_scope",
+            "evidence_contradicting",
+            "behavior_affecting",
+            "duplicate",
+            "wording_defect",
+        ),
+        required=True,
+    )
+    report_failure.add_argument("--description", required=True)
+    downstream = report_failure.add_mutually_exclusive_group()
+    downstream.add_argument(
+        "--downstream-event-id", help="downstream Proposal event id"
+    )
+    downstream.add_argument(
+        "--downstream-step-id", help="downstream native action step id"
+    )
+
+    archive_candidate = commands.add_parser(
+        "archive-candidate", help="inspect and review Codex Archive Candidates"
+    )
+    archive_commands = archive_candidate.add_subparsers(
+        dest="archive_candidate_command", required=True
+    )
+    archive_commands.add_parser("list")
+    archive_show = archive_commands.add_parser("show")
+    archive_show.add_argument("candidate_id")
+    archive_review = archive_commands.add_parser("review")
+    archive_review.add_argument("candidate_ids", nargs="+")
+    archive_review.add_argument(
+        "--state",
+        choices=("pending", "accepted", "rejected", "dismissed"),
+        required=True,
+    )
+
+    archive_session = commands.add_parser(
+        "archive-session", help="execute authorized Codex archive recovery controls"
+    )
+    archive_session_commands = archive_session.add_subparsers(
+        dest="archive_session_command", required=True
+    )
+    for operation in ("archive", "unarchive"):
+        command = archive_session_commands.add_parser(operation)
+        command.add_argument("session_id")
+    retry = archive_session_commands.add_parser("retry-candidate")
+    retry.add_argument("candidate_id")
+
     context = commands.add_parser(
         "context", help="assemble scoped Active Memory and Reference context"
     )
@@ -139,6 +209,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     commands.add_parser("status", help="show bounded Personal Assistant health")
 
+    localize = commands.add_parser(
+        "localize-pending", help="translate unresolved review items"
+    )
+    localize.add_argument("--language", choices=("en", "ko"), default="ko")
+
     evidence = commands.add_parser("resolve-evidence", help="resolve a v1 Evidence Locator")
     evidence.add_argument("locator")
     _source_root_args(evidence)
@@ -169,12 +244,16 @@ def _memory_authority_args(parser: argparse.ArgumentParser) -> None:
     _memory_scope_args(parser)
 
 
-def run(argv: list[str] | None = None) -> int:
+def run(
+    argv: list[str] | None = None,
+    *,
+    archive_adapter: archive_execution.ArchiveAdapter | None = None,
+) -> int:
     args = build_parser().parse_args(argv)
     try:
         root = args.root.resolve()
         identity = resolve_observer(root, args.identity)
-        assistant = PersonalAssistant(root, identity)
+        assistant = PersonalAssistant(root, identity, archive_adapter=archive_adapter)
         if args.command == "project":
             if args.project_command == "add":
                 result = assistant.add_project(args.path, args.name).to_dict()
@@ -258,6 +337,48 @@ def run(argv: list[str] | None = None) -> int:
                     project_selector=args.project,
                     global_scope=args.global_scope,
                 )
+        elif args.command == "native-memory":
+            if args.native_memory_command == "rebuild":
+                result = assistant.rebuild_native_memory()
+            else:
+                result = assistant.restore_native_memory(args.memory_id)
+        elif args.command == "memory-failure":
+            if args.memory_failure_command == "list":
+                result = {"memory_failures": assistant.memory_failures()}
+            elif args.memory_failure_command == "health":
+                result = assistant.memory_failure_health()
+            elif args.memory_failure_command == "quality":
+                result = {
+                    "memory_quality_observations": (
+                        assistant.memory_quality_observations()
+                    )
+                }
+            else:
+                result = assistant.report_memory_issue(
+                    args.memory_event_id,
+                    args.classification,
+                    args.description,
+                    downstream_event_id=args.downstream_event_id,
+                    downstream_step_id=args.downstream_step_id,
+                )
+        elif args.command == "archive-candidate":
+            if args.archive_candidate_command == "list":
+                result = {"archive_candidates": assistant.archive_candidates()}
+            elif args.archive_candidate_command == "show":
+                result = assistant.archive_candidate(args.candidate_id)
+                if result is None:
+                    raise AssistantError("Archive Candidate not found")
+            else:
+                result = assistant.review_archive_candidates(
+                    args.candidate_ids, args.state
+                )
+        elif args.command == "archive-session":
+            if args.archive_session_command == "archive":
+                result = assistant.archive_codex_session(args.session_id)
+            elif args.archive_session_command == "unarchive":
+                result = assistant.unarchive_codex_session(args.session_id)
+            else:
+                result = assistant.retry_archive_candidate(args.candidate_id)
         elif args.command == "context":
             result = assistant.response_context(
                 args.query, args.project, current_path=Path.cwd()
@@ -297,6 +418,8 @@ def run(argv: list[str] | None = None) -> int:
             result = {"status": "stopped", "bridge": "web"}
         elif args.command == "status":
             result = assistant_runtime.public_health(root, identity)
+        elif args.command == "localize-pending":
+            result = assistant.localize_pending(args.language)
         else:
             locator = EvidenceLocator.decode(args.locator)
             raw = assistant.resolve_evidence(

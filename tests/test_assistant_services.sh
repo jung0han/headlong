@@ -15,6 +15,8 @@ check() { local label="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$label"; el
 APP="$WORK/app"
 mkdir -p "$APP/deploy" "$APP/tools" "$APP/.identities/observer" "$WORK/systemd"
 cp "$REPO/deploy/assistant-service.sh" "$APP/deploy/"
+cp "$REPO/tools/headlong-archive-boundary" "$APP/tools/"
+chmod +x "$APP/tools/headlong-archive-boundary"
 cat >"$APP/.env" <<'EOF'
 LLM_PROVIDER=openai
 LLM_API_URL=https://root.invalid/v1/chat/completions
@@ -57,10 +59,29 @@ check "Codex wrapper invokes continuous public command" \
     grep -q '^--identity observer run-codex-bridge|openai|deepseek-test-route|identity-secret$' "$SMOKE_RECORD"
 check "Web wrapper invokes continuous public command" \
     grep -q '^--identity observer run-web-bridge|openai|deepseek-test-route|identity-secret$' "$SMOKE_RECORD"
+
+mkdir -p "$APP/web/.venv/bin"
+cat >"$APP/web/.venv/bin/headlong-assistant" <<'EOF'
+#!/usr/bin/env bash
+printf 'venv:%s\n' "$*" >>"$SMOKE_RECORD"
+EOF
+chmod +x "$APP/web/.venv/bin/headlong-assistant"
+bash "$APP/deploy/assistant-service.sh" "$APP" observer codex >/dev/null 2>"$WORK/codex-venv.err"
+check "assistant service uses the synchronized web venv executable" \
+    grep -q '^venv:--identity observer run-codex-bridge$' "$SMOKE_RECORD"
 check "Codex failure restarts only its supervised component" \
     grep -q '^Restart=on-failure$' "$REPO/deploy/headlong-assistant-codex@.service"
 check "Web failure restarts only its supervised component" \
     grep -q '^Restart=on-failure$' "$REPO/deploy/headlong-assistant-web@.service"
+check "Codex bridge death triggers the shared assistant alert" \
+    grep -q '^OnFailure=headlong-assistant-alert@codex-%i.service$' \
+        "$REPO/deploy/headlong-assistant-codex@.service"
+check "Web collector death triggers the shared assistant alert" \
+    grep -q '^OnFailure=headlong-assistant-alert@web-%i.service$' \
+        "$REPO/deploy/headlong-assistant-web@.service"
+check "assistant failure alert exposes only component and identity" \
+    bash -c 'grep -q "headlong-assistant-.*@.*\\.service" "$1" && ! grep -q "TOKEN.*printf\|KEY.*printf" "$1"' \
+        _ "$REPO/deploy/assistant-failure-alert.sh"
 check "bridge units do not place durable state in RuntimeDirectory" \
     bash -c '! grep -q ^RuntimeDirectory= "$1" "$2"' _ \
         "$REPO/deploy/headlong-assistant-codex@.service" \
@@ -72,7 +93,28 @@ check "Observer thinker cannot see the authority journal" \
 check "Observer thinker has filesystem and privilege isolation" \
     bash -c 'grep -q "^ProtectSystem=strict" "$1" && grep -q "^NoNewPrivileges=true" "$1" && grep -q "^PrivateDevices=true" "$1"' \
         _ "$REPO/deploy/headlong-thinkers@.service"
-check "proposal-only shell actor is not given trajectory authority" \
+check "Observer thinker cannot reach archive boundary socket" \
+    grep -q '^InaccessiblePaths=.*/run/headlong-archive' "$REPO/deploy/headlong-thinkers@.service"
+check "archive boundary is allowlisted and separately hardened" \
+    bash -c 'grep -q "^RestrictAddressFamilies=AF_UNIX" "$1" && grep -q "^PrivateNetwork=true" "$1" && grep -q "^CapabilityBoundingSet=$" "$1" && grep -q "^ExecCondition=/usr/bin/test -x /usr/bin/bwrap$" "$1" && grep -q "^ReadWritePaths=@CODEX_HOME@ @SHELLM_HOME@/app/.assistant-authority$" "$1" && ! grep -q "assistant-service.sh" "$1"' \
+        _ "$REPO/deploy/headlong-archive.service"
+check "archive boundary fails closed without delegated Codex write access" \
+    bash -c 'grep -q "^ExecCondition=/usr/bin/test -r @CODEX_HOME@$" "$1" && grep -q "^ExecCondition=/usr/bin/test -w @CODEX_HOME@/sessions$" "$1" && grep -q "^ExecCondition=/usr/bin/test -w @CODEX_HOME@/archived_sessions$" "$1"' \
+        _ "$REPO/deploy/headlong-archive.service"
+check "Codex bridge fails closed without delegated source access" \
+    bash -c 'grep -q "^ExecCondition=/usr/bin/test -r @CODEX_HOME@/sessions$" "$1" && grep -q "^ExecCondition=/usr/bin/test -x @CODEX_HOME@/sessions$" "$1" && grep -q "^ExecCondition=/usr/bin/test -r @CODEX_HOME@/archived_sessions$" "$1"' \
+        _ "$REPO/deploy/headlong-assistant-codex@.service"
+check "web and bridges cannot directly mutate configured Codex state" \
+    bash -c 'grep -q "^ReadOnlyPaths=@CODEX_HOME@$" "$1" && grep -q "^ReadOnlyPaths=@CODEX_HOME@$" "$2" && grep -q "^ReadOnlyPaths=@CODEX_HOME@$" "$3"' \
+        _ "$REPO/deploy/headlong-web.service" \
+        "$REPO/deploy/headlong-assistant-codex@.service" \
+        "$REPO/deploy/headlong-assistant-web@.service"
+check "dashboard and bridges share the assistant language configuration" \
+    bash -c 'for unit in "$@"; do grep -q "^EnvironmentFile=-/etc/headlong/assistant.env$" "$unit" || exit 1; done' \
+        _ "$REPO/deploy/headlong-web.service" \
+        "$REPO/deploy/headlong-assistant-codex@.service" \
+        "$REPO/deploy/headlong-assistant-web@.service"
+check "proposal-only shell actor keeps identity-local native learning authority" \
     bash -c 'grep -q "HEADLONG_PROPOSAL_ONLY" "$1" && grep -q "proposal-only Observer requires a container" "$2"' \
         _ "$REPO/thinkers/_lib/common.sh" "$REPO/thinkers/monolith/step"
 check "thinker service can reconcile the bundled roster" \
@@ -89,10 +131,11 @@ actor_flags=$(bash -c '
       GITHUB_TOKEN=forbidden SLACK_TOKEN=forbidden \
       _build_shellm_flags "$2" "$2/run"
 ' _ "$REPO/thinkers/_lib/common.sh" "$WORK/actor")
-if ! grep -q 'TRAJ_DIR\|TRAJ_ID\|GITHUB_TOKEN\|SLACK_TOKEN' <<<"$actor_flags"; then
-    ok "proposal-only actor flag allowlist omits trajectory and unrelated credentials"
+if grep -q 'TRAJ_DIR\|TRAJ_ID' <<<"$actor_flags" \
+    && ! grep -q 'GITHUB_TOKEN\|SLACK_TOKEN' <<<"$actor_flags"; then
+    ok "proposal-only actor retains native trajectory without unrelated credentials"
 else
-    bad "proposal-only actor flag allowlist omits trajectory and unrelated credentials"
+    bad "proposal-only actor retains native trajectory without unrelated credentials"
 fi
 if grep -qx 'OPENAI_API_KEY' <<<"$actor_flags"; then
     ok "proposal-only actor retains only its OpenAI-compatible route credential"
@@ -105,8 +148,8 @@ else
     bad "proposal-only actor retains its pinned TLS trust paths"
 fi
 
-for unit in headlong-thinkers@.service headlong-assistant-codex@.service headlong-assistant-web@.service; do
-    sed "s|@SHELLM_HOME@|$WORK/deploy-home|g" "$REPO/deploy/$unit" >"$WORK/systemd/$unit"
+for unit in headlong-archive.service headlong-thinkers@.service headlong-assistant-codex@.service headlong-assistant-web@.service headlong-assistant-alert@.service; do
+    sed -e "s|@SHELLM_HOME@|$WORK/deploy-home|g" -e "s|@CODEX_HOME@|$WORK/codex-home|g" "$REPO/deploy/$unit" >"$WORK/systemd/$unit"
 done
 cp "$REPO/deploy/headlong-assistant@.target" "$WORK/systemd/"
 if command -v systemd-analyze >/dev/null 2>&1; then
@@ -121,11 +164,81 @@ fi
 
 check "setup installs source units and target" \
     grep -q 'headlong-assistant-codex@ headlong-assistant-web@' "$REPO/deploy/setup.sh"
+check "setup installs the assistant failure alert unit" \
+    grep -q 'headlong-assistant-alert@' "$REPO/deploy/setup.sh"
+check "setup enables the archive boundary before web" \
+    grep -q 'enable --now headlong-archive headlong-web' "$REPO/deploy/setup.sh"
+check "setup creates the archive result journal allowlist" \
+    grep -q '"$APP_DIR/.assistant-authority"' "$REPO/deploy/setup.sh"
+check "setup preserves an existing external Codex home" \
+    bash -c 'grep -q '\''if \[\[ -e "$CODEX_HOME" \]\]'\'' "$1" && ! grep -q '\''"$CODEX_HOME" "$APP_DIR/.assistant-authority"'\'' "$1"' \
+        _ "$REPO/deploy/setup.sh"
+check "setup installs the archive child-process sandbox" \
+    grep -q 'bubblewrap' "$REPO/deploy/setup.sh"
+check "setup installs explicit ACL delegation support" \
+    grep -q 'bubblewrap acl' "$REPO/deploy/setup.sh"
+check "external Codex access is an explicit ACL delegation" \
+    bash -c 'grep -q "setfacl" "$1" && ! grep -q "chown\|chmod" "$1"' \
+        _ "$REPO/deploy/grant-codex-access.sh"
+check "update restarts the archive boundary" \
+    grep -q 'try-restart headlong-archive.service' "$REPO/deploy/update.sh"
+check "update preserves the archive result journal allowlist" \
+    grep -q '"$APP_DIR/.assistant-authority"' "$REPO/deploy/update.sh"
+check "update preserves an existing external Codex home" \
+    bash -c 'grep -q '\''if \[\[ -e "$CODEX_HOME" \]\]'\'' "$1" && ! grep -q '\''"$CODEX_HOME" "$APP_DIR/.assistant-authority"'\'' "$1"' \
+        _ "$REPO/deploy/update.sh"
+check "update installs a missing archive child-process sandbox" \
+    grep -q 'bubblewrap' "$REPO/deploy/update.sh"
+check "update installs missing ACL delegation support" \
+    grep -q 'apt-get install -y -qq acl' "$REPO/deploy/update.sh"
+check "update synchronizes the web venv before hardened services start" \
+    bash -c '
+        sync_line=$(grep -n "cd .*APP_DIR/web.*uv sync" "$1" | head -1 | cut -d: -f1)
+        archive_line=$(grep -n "archive_unit_src=" "$1" | head -1 | cut -d: -f1)
+        [[ -n "$sync_line" && -n "$archive_line" && "$sync_line" -lt "$archive_line" ]]
+    ' _ "$REPO/deploy/update.sh"
+
+LEGACY_HOME="$WORK/legacy-user"
+COPIED_BIN="$WORK/copied-bin"
+RECORDED_APP="$WORK/recorded-app"
+mkdir -p "$LEGACY_HOME/.shellm" "$COPIED_BIN" "$RECORDED_APP/web"
+printf '%s\n' "$RECORDED_APP" >"$LEGACY_HOME/.shellm/app_dir"
+cp "$REPO/tools/headlong-archive-boundary" "$COPIED_BIN/"
+cat >"$COPIED_BIN/uv" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >"$WRAPPER_RECORD"
+EOF
+chmod +x "$COPIED_BIN/headlong-archive-boundary" "$COPIED_BIN/uv"
+if HOME="$LEGACY_HOME" PATH="$COPIED_BIN:$PATH" WRAPPER_RECORD="$WORK/wrapper-record" \
+    env -u HEADLONG_HOME -u SHELLM_HOME \
+    "$COPIED_BIN/headlong-archive-boundary" --help >/dev/null 2>&1 \
+    && grep -q "^run --project $RECORDED_APP/web headlong-archive-boundary --help$" \
+        "$WORK/wrapper-record"; then
+    ok "copied archive boundary falls back to the legacy-only state home"
+else
+    bad "copied archive boundary falls back to the legacy-only state home"
+fi
+mkdir -p "$RECORDED_APP/web/.venv/bin"
+cat >"$RECORDED_APP/web/.venv/bin/headlong-archive-boundary" <<'EOF'
+#!/usr/bin/env bash
+printf 'venv:%s\n' "$*" >"$WRAPPER_RECORD"
+EOF
+chmod +x "$RECORDED_APP/web/.venv/bin/headlong-archive-boundary"
+if HOME="$LEGACY_HOME" PATH="$COPIED_BIN:$PATH" WRAPPER_RECORD="$WORK/wrapper-record" \
+    env -u HEADLONG_HOME -u SHELLM_HOME \
+    "$COPIED_BIN/headlong-archive-boundary" --help >/dev/null 2>&1 \
+    && grep -q '^venv:--help$' "$WORK/wrapper-record"; then
+    ok "archive boundary uses the synchronized web venv executable"
+else
+    bad "archive boundary uses the synchronized web venv executable"
+fi
 check "update restarts only active source bridge instances" \
     grep -q "try-restart 'headlong-assistant-codex@\*.service'" "$REPO/deploy/update.sh"
 check "assistant uninstall removes units without deleting identity state" \
-    bash -c 'grep -q headlong-assistant-codex@.service "$1" && ! grep -q "rm .*identit" "$1"' \
+    bash -c 'grep -q headlong-assistant-codex@.service "$1" && grep -q headlong-assistant-alert@.service "$1" && grep -q headlong-archive.service "$1" && ! grep -q "rm .*identit\|rm .*\.codex" "$1"' \
         _ "$REPO/deploy/uninstall-assistant-services.sh"
+check "assistant uninstall documents the shared sandbox package policy" \
+    grep -q 'bubblewrap' "$REPO/deploy/uninstall-assistant-services.sh"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [[ "$fail" -eq 0 ]]

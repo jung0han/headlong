@@ -13,14 +13,16 @@
 
 [Unit]
 Description=headlong web viewer + control plane
-After=network-online.target
-Wants=network-online.target
+After=network-online.target headlong-archive.service
+Wants=network-online.target headlong-archive.service
 
 [Service]
 Type=simple
 User=shellm
 WorkingDirectory=@SHELLM_HOME@/app
 Environment="PATH=@SHELLM_HOME@/.local/bin:@SHELLM_HOME@/.bun/bin:/usr/local/bin:/usr/bin:/bin"
+# Share host-specific assistant presentation settings with the dashboard API.
+EnvironmentFile=-/etc/headlong/assistant.env
 # Lock CORS to your public hostname once the tunnel is up:
 #Environment="HEADLONG_WEB_ALLOWED_ORIGINS=https://agents.example.com"
 # For a view-only deployment (no start/stop/chat/config mutations):
@@ -32,6 +34,7 @@ Environment="HEADLONG_WEB_SELF_UPDATE=1"
 # root-owned wrapper (sudo rule: /etc/sudoers.d/headlong-thinkers). Unset it
 # to fall back to spawning dispatchers directly (dev behavior).
 Environment="HEADLONG_THINKERSCTL=/usr/local/bin/headlong-thinkersctl"
+Environment="HEADLONG_ARCHIVE_SOCKET=/run/headlong-archive/archive.sock"
 ExecStart=@SHELLM_HOME@/app/tools/headlong-web @SHELLM_HOME@/app --host 127.0.0.1 --port 8080
 Restart=always
 RestartSec=3
@@ -52,6 +55,7 @@ MemoryMax=5G
 # any restart (including the dash's self-update). Agents have their own
 # kill switches: the UI's Kill All button and tools/headlong-killall.
 KillMode=process
+ReadOnlyPaths=@CODEX_HOME@
 
 # The agent needs broad shell access by design — do NOT run anything else on
 # this machine. Kill switches: `systemctl stop headlong-web` stops the control

@@ -23,7 +23,30 @@ tools live in [bin/](../bin/).
   `explore-web MEMORY --trigger-kind interest|open_loop` performs a one-time
   public search/follow run from an authorized memory record. Its page, link
   depth, elapsed-time, and stored-byte limits are deterministic; discovered
-  sites are never added to recurring registrations.
+  sites are never added to recurring registrations. `archive-candidate
+  list/show/review` exposes evidence-backed Codex completion claims; `review`
+  accepts one or more candidate ids for individual or batch review. Acceptance
+  records signed user authority and invokes the hardened, independently
+  verified Codex archive boundary once per stable session identity.
+  `archive-session archive`,
+  `archive-session unarchive`, and `archive-session retry-candidate` expose the
+  direct directive, recovery, and authorized retry paths without editing Codex
+  Session files. `status` returns bounded operational health for current
+  collection, newly eligible analysis, Historical Backfill, native-memory
+  capture, Structured Model Results, Archive Candidate review, and authorized
+  archive execution. `memory-failure report/list/quality/health` records the three
+  domain Memory Failure classes while retaining duplicate/wording feedback as
+  quality observations. A `behavior_affecting` report also requires
+  `--downstream-event-id` for a concrete Proposal event or
+  `--downstream-step-id` for a native action; action reports retain a trajectory
+  locator and compact snapshot. Proposal and action reports do not infer
+  causality from asynchronous memory-capture row ordering.
+  `native-memory rebuild/restore` recovers the native
+  Markdown store from its Activity Ledger history.
+- `headlong-archive-boundary` serves the authenticated, archive-only Unix
+  socket used by production assistant routes; it exposes no general command
+  execution interface. External Codex runs in a child mount namespace that
+  masks the Authority Journal and grants write access only to `CODEX_HOME`.
 - `shellm-docker-broker` is the host-side policy server for brokered
   Docker. It is never present in the mind's environment.
 - `shellm-explore` visualizes run trees, `pr-committee` runs multi-model

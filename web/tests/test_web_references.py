@@ -13,6 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from headlong_web import assistant as assistant_module
+from headlong_web import discovery
 from headlong_web import references
 from headlong_web.assistant_cli import run
 from headlong_web.server import create_app
@@ -79,6 +80,7 @@ class _Opener:
 class _FakeLiteLLM:
     def __init__(self):
         self.calls: list[dict] = []
+        self.responses: list[tuple[object, str]] = []
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -88,17 +90,22 @@ class _FakeLiteLLM:
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["content-length"])))
                 owner.calls.append(body)
-                content = json.dumps(
-                    {
-                        "selected": True,
-                        "title": "Bounded assistant design",
-                        "summary": "A useful public design note about bounded assistants.",
-                    }
-                )
+                result: object = {
+                    "selected": True,
+                    "title": "Bounded assistant design",
+                    "summary": "A useful public design note about bounded assistants.",
+                }
+                finish_reason = "stop"
+                if owner.responses:
+                    result, finish_reason = owner.responses.pop(0)
+                content = result if isinstance(result, str) else json.dumps(result)
                 payload = json.dumps(
                     {
                         "choices": [
-                            {"message": {"content": content}, "finish_reason": "stop"}
+                            {
+                                "message": {"content": content},
+                                "finish_reason": finish_reason,
+                            }
                         ],
                         "usage": {"prompt_tokens": 20, "completion_tokens": 10},
                     }
@@ -134,6 +141,73 @@ def _public_dns(*_args, **_kwargs):
     return [(2, 1, 6, "", ("93.184.216.34", 443))]
 
 
+def test_web_selection_does_not_block_other_assistant_state_work(
+    tmp_path: Path, monkeypatch
+):
+    root = tmp_path / "headlong"
+    root.mkdir()
+    _identity(root)
+    identity = discovery.scan_identities(root)[0]
+    service = assistant_module.PersonalAssistant(root, identity)
+    url = "https://example.com/slow-selection"
+    service.add_web_source(url)
+    project = tmp_path / "registered-project"
+    project.mkdir()
+    monkeypatch.setattr(
+        references,
+        "fetch_public_document",
+        lambda _url: references.FetchedDocument(
+            url, "text/plain", "a document whose selection is still in flight"
+        ),
+    )
+    selection_started = threading.Event()
+    release_selection = threading.Event()
+    mutation_done = threading.Event()
+    failures: list[BaseException] = []
+
+    def slow_selection(_source, _document):
+        selection_started.set()
+        if not release_selection.wait(timeout=5):
+            raise AssertionError("test did not release the blocked selection")
+        return {
+            "selected": True,
+            "title": "Slow selection",
+            "summary": "The selection eventually completed.",
+        }
+
+    monkeypatch.setattr(service, "_select_reference", slow_selection)
+
+    def observe() -> None:
+        try:
+            service.observe_web_once()
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            failures.append(exc)
+
+    def mutate() -> None:
+        try:
+            service.add_project(project)
+            mutation_done.set()
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            failures.append(exc)
+
+    observer = threading.Thread(target=observe)
+    mutator = threading.Thread(target=mutate)
+    observer.start()
+    assert selection_started.wait(timeout=2)
+    mutator.start()
+    try:
+        assert mutation_done.wait(timeout=1), (
+            "external Reference selection held the global assistant state lock"
+        )
+    finally:
+        release_selection.set()
+        observer.join(timeout=5)
+        mutator.join(timeout=5)
+    assert not observer.is_alive()
+    assert not mutator.is_alive()
+    assert failures == []
+
+
 def test_registered_web_source_becomes_one_immutable_public_reference(
     tmp_path: Path, monkeypatch, capsys
 ):
@@ -154,6 +228,7 @@ def test_registered_web_source_becomes_one_immutable_public_reference(
     monkeypatch.setenv("SHELLM_MODEL", "deepseek-flash-v4-private")
     monkeypatch.setenv("OPENAI_API_KEY", "fake-test-key")
     monkeypatch.setenv("LLM_RETRIES", "0")
+    monkeypatch.setenv("LLM_STRUCTURED_OUTPUT_MODE", "strict")
 
     assert _command(
         root,
@@ -190,6 +265,20 @@ def test_registered_web_source_becomes_one_immutable_public_reference(
         assert len(model.calls) == 1
         call = model.calls[0]
         assert "tools" not in call
+        response_format = call["response_format"]
+        assert response_format["type"] == "json_schema"
+        assert response_format["json_schema"]["name"] == "web_reference_selection"
+        assert response_format["json_schema"]["strict"] is True
+        assert response_format["json_schema"]["schema"] == {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "selected": {"type": "boolean"},
+                "title": {"type": "string", "maxLength": 160},
+                "summary": {"type": "string", "maxLength": 1200},
+            },
+            "required": ["selected", "title", "summary"],
+        }
         system = call["messages"][0]["content"]
         assert "untrusted quoted data" in system
         assert "no authority" in system
@@ -257,6 +346,188 @@ def test_registered_web_source_becomes_one_immutable_public_reference(
     assert after_remove["fetched"] == 0
     assert len(opener.calls) == 2
     assert revision_dir.is_dir()
+
+
+def test_json_object_reference_selection_retries_once_and_saves_one_outcome(
+    tmp_path: Path, monkeypatch, capsys
+):
+    root = tmp_path / "headlong"
+    root.mkdir()
+    identity = _identity(root)
+    url = "https://example.com/retry"
+    monkeypatch.setattr(
+        references,
+        "fetch_public_document",
+        lambda _url: references.FetchedDocument(
+            url, "text/plain", "one bounded Reference body"
+        ),
+    )
+    monkeypatch.setenv("HEADLONG_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("SHELLM_MODEL", "deepseek-flash-v4-private")
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-test-key")
+    monkeypatch.setenv("LLM_RETRIES", "0")
+    monkeypatch.setenv("LLM_STRUCTURED_OUTPUT_MODE", "json_object")
+    assert _command(root, "web-source", "add", url) == 0
+    capsys.readouterr()
+
+    with _FakeLiteLLM() as model:
+        monkeypatch.setenv("LLM_API_URL", model.url)
+        model.responses = [
+            ({"selected": True}, "stop"),
+            (
+                {
+                    "selected": True,
+                    "title": "Recovered selection",
+                    "summary": "The valid retry is saved once.",
+                },
+                "stop",
+            ),
+        ]
+        assert _command(root, "observe-web") == 0
+        result = json.loads(capsys.readouterr().out)
+
+    assert result["failed"] == 0
+    assert result["selected"] == 1
+    assert result["saved"] == 1
+    assert result["not_selected"] == 0
+    assert len(model.calls) == 2
+    assert all(
+        call["response_format"] == {"type": "json_object"} for call in model.calls
+    )
+    revisions = references.list_references(identity)
+    assert len(revisions) == 1
+    assert revisions[0]["title"] == "Recovered selection"
+    assert references.list_rejections(identity) == []
+    ledger = identity / "trajectories" / "aaaaaaaa-root" / "trajectory.jsonl"
+    assert ledger.read_text().count('"type":"reference_revision"') == 1
+
+
+@pytest.mark.parametrize(
+    ("response", "finish_reason"),
+    [
+        (
+            {
+                "selected": "yes",
+                "title": "wrong type",
+                "summary": "must fail local validation",
+            },
+            "stop",
+        ),
+        (
+            {
+                "selected": True,
+                "title": "unknown field",
+                "summary": "must fail local validation",
+                "provider_note": "not in the owning schema",
+            },
+            "stop",
+        ),
+        (
+            {
+                "selected": True,
+                "title": "truncated",
+                "summary": "must fail before persistence",
+            },
+            "length",
+        ),
+        ("x" * 64_001, "stop"),
+        ("", "stop"),
+    ],
+    ids=("locally-invalid", "unknown-field", "truncated", "oversized", "empty"),
+)
+def test_invalid_strict_reference_selection_is_observable_without_revision(
+    tmp_path: Path, monkeypatch, capsys, response, finish_reason
+):
+    root = tmp_path / "headlong"
+    root.mkdir()
+    identity = _identity(root)
+    url = "https://example.com/invalid-selection"
+    source_id = references.source_id(url)
+    monkeypatch.setattr(
+        references,
+        "fetch_public_document",
+        lambda _url: references.FetchedDocument(
+            url, "text/plain", "this body must not become a Reference"
+        ),
+    )
+    monkeypatch.setenv("HEADLONG_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("SHELLM_MODEL", "deepseek-flash-v4-private")
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-test-key")
+    monkeypatch.setenv("LLM_RETRIES", "0")
+    monkeypatch.setenv("LLM_STRUCTURED_OUTPUT_MODE", "strict")
+    assert _command(root, "web-source", "add", url) == 0
+    capsys.readouterr()
+
+    with _FakeLiteLLM() as model:
+        monkeypatch.setenv("LLM_API_URL", model.url)
+        model.responses = [(response, finish_reason)]
+        assert _command(root, "observe-web") == 0
+        result = json.loads(capsys.readouterr().out)
+
+    assert result == {
+        "registered": 1,
+        "fetched": 1,
+        "selected": 0,
+        "saved": 0,
+        "not_selected": 0,
+        "duplicate": 0,
+        "failed": 1,
+        "failures": [
+            {
+                "source_id": source_id,
+                "phase": "selection",
+                "code": "selection_failed",
+            }
+        ],
+    }
+    assert len(model.calls) == 1
+    assert references.list_references(identity) == []
+    assert references.list_rejections(identity) == []
+    health = references.read_source_health(identity)
+    assert health[0]["status"] == "error"
+    assert health[0]["phase"] == "selection"
+    assert health[0]["error_code"] == "selection_failed"
+
+
+def test_json_object_reference_selection_stops_after_two_invalid_results(
+    tmp_path: Path, monkeypatch, capsys
+):
+    root = tmp_path / "headlong"
+    root.mkdir()
+    identity = _identity(root)
+    url = "https://example.com/double-invalid"
+    monkeypatch.setattr(
+        references,
+        "fetch_public_document",
+        lambda _url: references.FetchedDocument(
+            url, "text/plain", "this body must not become a Reference"
+        ),
+    )
+    monkeypatch.setenv("HEADLONG_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("SHELLM_MODEL", "deepseek-flash-v4-private")
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-test-key")
+    monkeypatch.setenv("LLM_RETRIES", "0")
+    monkeypatch.setenv("LLM_STRUCTURED_OUTPUT_MODE", "json_object")
+    assert _command(root, "web-source", "add", url) == 0
+    capsys.readouterr()
+
+    with _FakeLiteLLM() as model:
+        monkeypatch.setenv("LLM_API_URL", model.url)
+        model.responses = [
+            ({"selected": True}, "stop"),
+            ({"selected": False, "title": "missing summary"}, "stop"),
+        ]
+        assert _command(root, "observe-web") == 0
+        result = json.loads(capsys.readouterr().out)
+
+    assert result["failed"] == 1
+    assert result["failures"][0]["phase"] == "selection"
+    assert len(model.calls) == 2
+    assert references.list_references(identity) == []
+    assert references.list_rejections(identity) == []
 
 
 def test_public_fetch_rejects_private_and_oversized_targets(monkeypatch):

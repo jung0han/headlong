@@ -5,6 +5,7 @@ Description=headlong Codex bridge for Observer Identity %i
 After=network-online.target
 Wants=network-online.target
 PartOf=headlong-assistant@%i.target
+OnFailure=headlong-assistant-alert@codex-%i.service
 
 [Service]
 Type=simple
@@ -13,10 +14,27 @@ WorkingDirectory=@SHELLM_HOME@/app
 Environment="PATH=@SHELLM_HOME@/.local/bin:/usr/local/bin:/usr/bin:/bin"
 # Host-specific CODEX_HOME and intervals belong here, outside the repository.
 EnvironmentFile=-/etc/headlong/assistant.env
+Environment="HEADLONG_ARCHIVE_SOCKET=/run/headlong-archive/archive.sock"
+ExecCondition=/usr/bin/test -r @CODEX_HOME@/sessions
+ExecCondition=/usr/bin/test -x @CODEX_HOME@/sessions
+ExecCondition=/usr/bin/test -r @CODEX_HOME@/archived_sessions
+ExecCondition=/usr/bin/test -x @CODEX_HOME@/archived_sessions
 ExecStart=/bin/bash @SHELLM_HOME@/app/deploy/assistant-service.sh @SHELLM_HOME@/app %i codex
 Restart=on-failure
 RestartSec=10
 TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=@SHELLM_HOME@/app/.identities/%i @SHELLM_HOME@/app/.assistant-authority @SHELLM_HOME@/app/.assistant-observers
+ReadOnlyPaths=@CODEX_HOME@
 
 [Install]
 WantedBy=headlong-assistant@%i.target

@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from headlong_web.assistant import PersonalAssistant, resolve_observer
@@ -33,6 +34,9 @@ class FakeLiteLLM:
     def __init__(self):
         self.calls: list[dict] = []
         self.fail = False
+        self.fail_status = 500
+        self.fail_message = "temporary route failure"
+        self.responses: list[tuple[object, str]] = []
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -43,8 +47,10 @@ class FakeLiteLLM:
                 body = json.loads(self.rfile.read(int(self.headers["content-length"])))
                 owner.calls.append(body)
                 if owner.fail:
-                    payload = b'{"error":{"message":"temporary route failure"}}'
-                    self.send_response(500)
+                    payload = json.dumps(
+                        {"error": {"message": owner.fail_message}}
+                    ).encode()
+                    self.send_response(owner.fail_status)
                 else:
                     prompt = body["messages"][-1]["content"]
                     locators = [
@@ -52,7 +58,7 @@ class FakeLiteLLM:
                         for line in prompt.splitlines()
                         if line.startswith("EVIDENCE_LOCATOR ")
                     ]
-                    result = {
+                    result: object = {
                         "title": "Session work changed",
                         "observation": "The registered work has a new meaningful state.",
                         "evidence_locators": [locators[-1]],
@@ -65,16 +71,25 @@ class FakeLiteLLM:
                         "improvement_signals": [
                             {
                                 "kind": "tool_failure",
+                                "proposal_type": "work",
                                 "content": "A tool failure may justify a later proposal.",
                                 "evidence_locators": [locators[-1]],
                             }
                         ],
+                        "archive_candidates": [],
                     }
-                    content = json.dumps(result)
+                    finish_reason = "stop"
+                    if owner.responses:
+                        configured, finish_reason = owner.responses.pop(0)
+                        result = configured(result) if callable(configured) else configured
+                    content = result if isinstance(result, str) else json.dumps(result)
                     payload = json.dumps(
                         {
                             "choices": [
-                                {"message": {"content": content}, "finish_reason": "stop"}
+                                {
+                                    "message": {"content": content},
+                                    "finish_reason": finish_reason,
+                                }
                             ],
                             "usage": {"prompt_tokens": 20, "completion_tokens": 10},
                         }
@@ -141,11 +156,32 @@ def _configure_model(monkeypatch, model: FakeLiteLLM, tmp_path: Path) -> None:
     monkeypatch.setenv("LLM_API_URL", model.url)
 
 
+def _archived_assistant(tmp_path: Path, capsys):
+    root = tmp_path / "headlong"
+    root.mkdir()
+    identity = _identity(root)
+    project = tmp_path / "project"
+    project.mkdir()
+    active = tmp_path / "codex" / "sessions"
+    archived = tmp_path / "codex" / "archived_sessions"
+    active.mkdir(parents=True)
+    archived.mkdir(parents=True)
+    (archived / "session.jsonl").write_bytes(
+        _row({"type": "session_meta", "payload": {"id": SESSION_ID, "cwd": str(project)}})
+        + _row({"type": "event_msg", "payload": {"type": "task_complete"}})
+    )
+    assert _command(root, "project", "add", str(project)) == 0
+    capsys.readouterr()
+    clock = FakeClock(datetime(2026, 8, 27, 0, 0, tzinfo=timezone.utc))
+    return identity, active, archived, _assistant(root, clock)
+
+
 def test_provisional_final_and_later_revision_are_timed_and_append_only(
     tmp_path: Path, monkeypatch, capsys
 ):
     root = tmp_path / "headlong"
     root.mkdir()
+    (root / ".env").write_text("LLM_STRUCTURED_OUTPUT_MODE=strict\n")
     identity = _identity(root)
     project = tmp_path / "project"
     project.mkdir()
@@ -165,6 +201,7 @@ def test_provisional_final_and_later_revision_are_timed_and_append_only(
     assistant = _assistant(root, clock)
     with FakeLiteLLM() as model:
         _configure_model(monkeypatch, model, tmp_path)
+        monkeypatch.setenv("HEADLONG_ASSISTANT_LANGUAGE", "ko")
         first = assistant.process_codex_once(active, archived)
         assert first["analysis"]["waiting"] == 1
         assert first["analysis"]["provisional"] == 0
@@ -175,6 +212,47 @@ def test_provisional_final_and_later_revision_are_timed_and_append_only(
         clock.advance(seconds=1)
         assert assistant.analyze_codex_once(active, archived)["provisional"] == 1
         assert len(model.calls) == 1
+        assert "Write all human-readable fields in Korean" in model.calls[0][
+            "messages"
+        ][0]["content"]
+        response_format = model.calls[0]["response_format"]
+        assert response_format["type"] == "json_schema"
+        assert response_format["json_schema"]["name"] == "codex_session_analysis"
+        assert response_format["json_schema"]["strict"] is True
+        schema = response_format["json_schema"]["schema"]
+        assert schema["additionalProperties"] is False
+        assert schema["properties"]["evidence_locators"]["maxItems"] == 1
+        supplied_locators = sorted(
+            line.removeprefix("EVIDENCE_LOCATOR ")
+            for line in model.calls[0]["messages"][-1]["content"].splitlines()
+            if line.startswith("EVIDENCE_LOCATOR ")
+        )
+        assert supplied_locators[0] == "E1"
+        assert all(
+            locator.startswith("E") and locator[1:].isdigit()
+            for locator in supplied_locators
+        )
+        assert (
+            schema["properties"]["evidence_locators"]["items"]["enum"]
+            == supplied_locators
+        )
+        for field, max_items in (
+            ("memory_candidates", 1),
+            ("improvement_signals", 1),
+            ("archive_candidates", 2),
+        ):
+            assert schema["properties"][field]["maxItems"] == max_items
+            assert (
+                schema["properties"][field]["items"]["properties"]
+                ["evidence_locators"]["maxItems"]
+                == 1
+            )
+            assert (
+                schema["properties"][field]["items"]["properties"]
+                ["evidence_locators"]["items"]["enum"]
+                == supplied_locators
+            )
+        assert model.calls[0]["max_tokens"] == 4096
         assert assistant.analyze_codex_once(active, archived)["duplicate"] == 1
 
         clock.advance(minutes=24, seconds=59)
@@ -276,6 +354,7 @@ def test_model_failure_keeps_cursor_and_final_marker_retriable(
         state_path = identity / "assistant" / "analysis" / "codex" / f"{SESSION_ID}.json"
         failed_state = json.loads(state_path.read_text())
         assert failed_state["status"] == "failed"
+        assert failed_state["last_error"] == "route_failure"
         assert failed_state["final_event_id"] is None
         assert not any(
             event.get("analysis_state") == "final" for event in _events(identity)
@@ -286,8 +365,18 @@ def test_model_failure_keeps_cursor_and_final_marker_retriable(
         )
         assert health["status"] == "degraded"
         assert health["analysis"]["sessions"][0]["status"] == "failed"
+        structured = json.loads(
+            (
+                identity
+                / "assistant"
+                / "source-health"
+                / "structured-results.json"
+            ).read_text()
+        )
+        assert structured["last_error"] == "route_failure"
 
         model.fail = False
+        clock.advance(minutes=1)
         retried = assistant.analyze_codex_once(active, archived)
         assert retried["final"] == 1
         assert json.loads(cursor_path.read_text()) == cursor_before
@@ -301,3 +390,308 @@ def test_model_failure_keeps_cursor_and_final_marker_retriable(
             event for event in _events(identity) if event.get("analysis_state") == "failed"
         )
         assert failed["event_id"] in final["supersedes_event_ids"]
+
+
+def test_failed_revision_obeys_exponential_retry_backoff(
+    tmp_path: Path, monkeypatch, capsys
+):
+    identity, active, archived, assistant = _archived_assistant(tmp_path, capsys)
+    clock = assistant._clock
+
+    with FakeLiteLLM() as model:
+        _configure_model(monkeypatch, model, tmp_path)
+        model.fail = True
+
+        first = assistant.process_codex_once(active, archived)
+        assert first["analysis"]["failed"] == 1
+        assert len(model.calls) == 1
+
+        immediate = assistant.analyze_codex_once(active, archived)
+        assert immediate["failed"] == 0
+        assert immediate["waiting"] == 1
+        assert len(model.calls) == 1
+
+        clock.advance(seconds=59)
+        before_first_retry = assistant.analyze_codex_once(active, archived)
+        assert before_first_retry["failed"] == 0
+        assert len(model.calls) == 1
+
+        clock.advance(seconds=1)
+        first_retry = assistant.analyze_codex_once(active, archived)
+        assert first_retry["failed"] == 1
+        assert len(model.calls) == 2
+
+        clock.advance(minutes=1)
+        before_second_retry = assistant.analyze_codex_once(active, archived)
+        assert before_second_retry["failed"] == 0
+        assert len(model.calls) == 2
+
+        model.fail = False
+        clock.advance(minutes=1)
+        recovered = assistant.analyze_codex_once(active, archived)
+        assert recovered["final"] == 1
+        assert len(model.calls) == 3
+
+    state = json.loads(
+        (
+            identity
+            / "assistant"
+            / "analysis"
+            / "codex"
+            / f"{SESSION_ID}.json"
+        ).read_text()
+    )
+    assert state["consecutive_failures"] == 0
+    assert state["next_retry_at"] is None
+
+
+@pytest.mark.parametrize(
+    ("status", "message", "expected"),
+    [
+        (401, "invalid API key: secret provider detail", "configuration"),
+        (400, "maximum context length exceeded", "context_rejected"),
+        (
+            429,
+            "Rate limit exceeded for api_key: opaque provider detail",
+            "rate_limited",
+        ),
+    ],
+    ids=("authentication", "context", "rate-limit"),
+)
+def test_model_route_failure_is_safely_classified(
+    tmp_path: Path, monkeypatch, capsys, status, message, expected
+):
+    identity, active, archived, assistant = _archived_assistant(tmp_path, capsys)
+    with FakeLiteLLM() as model:
+        _configure_model(monkeypatch, model, tmp_path)
+        model.fail = True
+        model.fail_status = status
+        model.fail_message = message
+        result = assistant.process_codex_once(active, archived)
+
+    assert result["analysis"]["failed"] == 1
+    state = json.loads(
+        (
+            identity
+            / "assistant"
+            / "analysis"
+            / "codex"
+            / f"{SESSION_ID}.json"
+        ).read_text()
+    )
+    assert state["last_error"] == expected
+    structured = json.loads(
+        (
+            identity
+            / "assistant"
+            / "source-health"
+            / "structured-results.json"
+        ).read_text()
+    )
+    assert structured["last_error"] == expected
+    assert message not in json.dumps(structured)
+
+
+def test_model_transport_failure_is_safely_classified(
+    tmp_path: Path, monkeypatch, capsys
+):
+    identity, active, archived, assistant = _archived_assistant(tmp_path, capsys)
+    monkeypatch.setenv("HEADLONG_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("SHELLM_MODEL", "deepseek-flash-v4-private")
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-test-key")
+    monkeypatch.setenv("LLM_RETRIES", "0")
+    monkeypatch.setenv("LLM_CONNECT_TIMEOUT", "1")
+    monkeypatch.setenv("LLM_MAX_TIME", "1")
+    monkeypatch.setenv("LLM_API_URL", "http://127.0.0.1:1/v1/chat/completions")
+
+    result = assistant.process_codex_once(active, archived)
+
+    assert result["analysis"]["failed"] == 1
+    state = json.loads(
+        (
+            identity
+            / "assistant"
+            / "analysis"
+            / "codex"
+            / f"{SESSION_ID}.json"
+        ).read_text()
+    )
+    assert state["last_error"] == "transport"
+    structured = json.loads(
+        (
+            identity
+            / "assistant"
+            / "source-health"
+            / "structured-results.json"
+        ).read_text()
+    )
+    assert structured["last_error"] == "transport"
+
+
+def test_json_object_fallback_recovers_after_one_invalid_result(
+    tmp_path: Path, monkeypatch, capsys
+):
+    root = tmp_path / "headlong"
+    root.mkdir()
+    identity = _identity(root)
+    project = tmp_path / "project"
+    project.mkdir()
+    active = tmp_path / "codex" / "sessions"
+    archived = tmp_path / "codex" / "archived_sessions"
+    active.mkdir(parents=True)
+    archived.mkdir(parents=True)
+    session = archived / "session.jsonl"
+    session.write_bytes(
+        _row({"type": "session_meta", "payload": {"id": SESSION_ID, "cwd": str(project)}})
+        + _row({"type": "event_msg", "payload": {"type": "task_complete"}})
+    )
+    assert _command(root, "project", "add", str(project)) == 0
+    capsys.readouterr()
+    assistant = _assistant(
+        root, FakeClock(datetime(2026, 8, 27, 0, 0, tzinfo=timezone.utc))
+    )
+
+    with FakeLiteLLM() as model:
+        _configure_model(monkeypatch, model, tmp_path)
+        monkeypatch.setenv("LLM_STRUCTURED_OUTPUT_MODE", "json_object")
+        model.responses = [({"title": "missing contract fields"}, "stop")]
+        result = assistant.process_codex_once(active, archived)
+
+    assert result["analysis"]["final"] == 1
+    assert result["analysis"]["failed"] == 0
+    assert len(model.calls) == 2
+    assert all(call["response_format"] == {"type": "json_object"} for call in model.calls)
+    assert any(event.get("analysis_state") == "final" for event in _events(identity))
+
+
+def test_large_session_analysis_is_bounded_and_keeps_latest_evidence(
+    tmp_path: Path, monkeypatch, capsys
+):
+    root = tmp_path / "headlong"
+    root.mkdir()
+    identity = _identity(root)
+    project = tmp_path / "project"
+    project.mkdir()
+    active = tmp_path / "codex" / "sessions"
+    archived = tmp_path / "codex" / "archived_sessions"
+    active.mkdir(parents=True)
+    archived.mkdir(parents=True)
+    session = archived / "large-session.jsonl"
+    rows = [
+        _row(
+            {
+                "type": "session_meta",
+                "payload": {"id": SESSION_ID, "cwd": str(project)},
+            }
+        ),
+        *(
+            _row(
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "agent_message",
+                        "message": f"older-{index}-" + "x" * (64 * 1024),
+                    },
+                }
+            )
+            for index in range(20)
+        ),
+        _row(
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "agent_message",
+                    "message": "Remember the latest bounded-analysis decision.",
+                },
+            }
+        ),
+    ]
+    session.write_bytes(b"".join(rows))
+    assert _command(root, "project", "add", str(project)) == 0
+    capsys.readouterr()
+    assistant = _assistant(
+        root, FakeClock(datetime(2026, 8, 27, 0, 0, tzinfo=timezone.utc))
+    )
+
+    with FakeLiteLLM() as model:
+        _configure_model(monkeypatch, model, tmp_path)
+        result = assistant.process_codex_once(active, archived)
+
+    assert result["analysis"]["final"] == 1
+    prompt = model.calls[0]["messages"][-1]["content"]
+    assert len(prompt.encode()) <= 256 * 1024
+    assert "Remember the latest bounded-analysis decision." in prompt
+    final = next(
+        event for event in _events(identity) if event.get("analysis_state") == "final"
+    )
+    assert final["evidence_locators"][0]["line"] == len(rows)
+    memory_candidate = next(
+        event for event in _events(identity) if event.get("type") == "memory-candidate"
+    )
+    assert memory_candidate["evidence_locators"][0]["line"] == len(rows)
+
+
+def test_json_object_fallback_double_failure_is_observable_without_analysis(
+    tmp_path: Path, monkeypatch, capsys
+):
+    identity, active, archived, assistant = _archived_assistant(tmp_path, capsys)
+    with FakeLiteLLM() as model:
+        _configure_model(monkeypatch, model, tmp_path)
+        monkeypatch.setenv("LLM_STRUCTURED_OUTPUT_MODE", "json_object")
+        model.responses = [
+            ({"title": "missing contract fields"}, "stop"),
+            ({"title": "still missing contract fields"}, "stop"),
+        ]
+        result = assistant.process_codex_once(active, archived)
+
+    assert result["analysis"]["failed"] == 1
+    assert len(model.calls) == 2
+    events = _events(identity)
+    assert any(event.get("analysis_state") == "failed" for event in events)
+    assert not any(event.get("analysis_state") == "final" for event in events)
+
+
+def test_strict_mode_rejects_unknown_fields_without_retry_or_analysis(
+    tmp_path: Path, monkeypatch, capsys
+):
+    identity, active, archived, assistant = _archived_assistant(tmp_path, capsys)
+
+    def add_unknown(result: dict) -> dict:
+        return {**result, "provider_note": "must not persist"}
+
+    with FakeLiteLLM() as model:
+        _configure_model(monkeypatch, model, tmp_path)
+        monkeypatch.setenv("LLM_STRUCTURED_OUTPUT_MODE", "strict")
+        model.responses = [(add_unknown, "stop")]
+        result = assistant.process_codex_once(active, archived)
+
+    assert result["analysis"]["failed"] == 1
+    assert len(model.calls) == 1
+    assert not any(event.get("analysis_state") == "final" for event in _events(identity))
+
+
+@pytest.mark.parametrize(
+    ("configured", "finish_reason"),
+    [
+        (lambda result: result, "length"),
+        ("x" * 64_001, "stop"),
+        ("", "stop"),
+    ],
+    ids=("truncated", "oversized", "empty"),
+)
+def test_strict_mode_rejects_invalid_output_without_analysis(
+    tmp_path: Path, monkeypatch, capsys, configured, finish_reason
+):
+    identity, active, archived, assistant = _archived_assistant(tmp_path, capsys)
+    with FakeLiteLLM() as model:
+        _configure_model(monkeypatch, model, tmp_path)
+        monkeypatch.setenv("LLM_STRUCTURED_OUTPUT_MODE", "strict")
+        model.responses = [(configured, finish_reason)]
+        result = assistant.process_codex_once(active, archived)
+
+    assert result["analysis"]["failed"] == 1
+    assert len(model.calls) == 1
+    assert not any(
+        event.get("analysis_state") == "final" for event in _events(identity)
+    )

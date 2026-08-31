@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# bubblewrap is a shared system sandbox package and is deliberately retained.
 set -euo pipefail
 
 # Remove only Personal Assistant supervision. Identity state, the dashboard,
@@ -16,16 +17,20 @@ mapfile -t targets < <(
 for target in "${targets[@]+"${targets[@]}"}"; do
     systemctl disable --now "$target" >/dev/null 2>&1 || true
 done
+systemctl disable --now headlong-archive.service >/dev/null 2>&1 || true
 
 for path in \
     /etc/systemd/system/headlong-assistant-codex@.service \
     /etc/systemd/system/headlong-assistant-web@.service \
-    /etc/systemd/system/headlong-assistant@.target; do
+    /etc/systemd/system/headlong-assistant-alert@.service \
+    /etc/systemd/system/headlong-assistant@.target \
+    /etc/systemd/system/headlong-archive.service; do
     rm -f "$path"
 done
 systemctl daemon-reload
 systemctl reset-failed 'headlong-assistant-codex@*.service' \
-    'headlong-assistant-web@*.service' 'headlong-assistant@*.target' \
+    'headlong-assistant-web@*.service' 'headlong-assistant-alert@*.service' \
+    'headlong-assistant@*.target' \
     >/dev/null 2>&1 || true
 
 echo "Personal Assistant services removed; Observer Identity state was preserved."

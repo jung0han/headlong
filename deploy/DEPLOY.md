@@ -123,6 +123,7 @@ Host-only source paths and cycle intervals belong in
 
 ```bash
 CODEX_HOME=/home/operator/.codex
+HEADLONG_ASSISTANT_LANGUAGE=ko
 HEADLONG_CODEX_BRIDGE_INTERVAL_SECONDS=10
 HEADLONG_WEB_BRIDGE_INTERVAL_SECONDS=900
 HEADLONG_ASSISTANT_STORAGE_LIMIT_BYTES=1000000000
@@ -131,14 +132,39 @@ HEADLONG_ASSISTANT_STORAGE_LIMIT_BYTES=1000000000
 The root app `.env`, Observer `.env`, and identity `activate` file are then
 loaded with the same precedence as `headlong-thinkers@`. Both bridges run the
 direct-and-shellm model probe before persistent work begins. Cursor, projection,
-and Reference state lives under the identity rather than `/run`, so a service
-restart reuses it.
+native-memory audit, scheduler, and Reference state lives under the identity
+rather than `/run`, so a service restart reuses it. The Codex bridge schedules
+three independent lanes in priority order:
+
+1. `active_collection` ingests deltas from current Codex Sessions.
+2. `newly_eligible_analysis` runs Provisional Analysis after five idle minutes
+   and Final Consolidation after thirty minutes or archival.
+3. `historical_backfill` uses the remaining capacity, newest first, until every
+   authorized historical session is covered.
+
+Current work therefore remains responsive while a large Historical Backfill is
+still running. Restarting a bridge resumes from durable cursors; it does not
+restart the backfill from zero.
 
 `GET /api/identities/.identities~observer/assistant/health` (or
-`headlong-assistant --identity observer status`) reports only allowlisted model
-route metadata, cursor offsets and digests, last success, compact error codes,
-and storage-limit state. It does not return source paths, credentials, raw
-session events, request errors, or Reference bodies.
+`headlong-assistant --identity observer status`) reports the three Codex lanes,
+native HeadLong Memory capture, Structured Model Result mode and failure count,
+Archive Candidate review, archive execution attempts, allowlisted model-route
+metadata, cursor offsets and digests, and Reference storage limits. These are
+compact marker projections written when work occurs, so the health request does
+not scan the Activity Ledger. It never returns source paths, credentials,
+prompts, complete session events, adapter output, request errors, or Reference
+bodies.
+
+Interpret the operational sections separately. A nonzero Historical Backfill
+is normal while `last_progress_at` continues to move. A structured-result
+failure means malformed model output was rejected before persistence and is
+retryable. A pending Archive Candidate is advisory and grants no execution
+authority. Archive execution becomes possible only after the user accepts that
+candidate or issues an explicit `archive-session archive` directive; it uses
+Codex's archive interface and never edits session files directly. Observation
+bridges mount the host home read-only under systemd hardening, while the native
+actor remains proposal-only and cannot read the signed authority journal.
 
 Stop or restart the whole group with the target, or operate one bridge without
 disturbing the mind or the other bridge:
@@ -146,7 +172,123 @@ disturbing the mind or the other bridge:
 ```bash
 sudo systemctl stop headlong-assistant@observer.target
 sudo systemctl restart headlong-assistant-codex@observer
+journalctl -u headlong-assistant-codex@observer -n 100
 ```
+
+Codex and Web bridge failures restart independently and trigger
+`headlong-assistant-alert@...`. If Slack alerting is not configured, the
+failure-open fallback is `/var/tmp/headlong-assistant-alert.log`; the alert
+contains only allowlisted systemd fields, never model or source content.
+
+### Model gateway reliability contract
+
+For a non-streaming OpenAI-compatible route, `bin/llm` relies on
+`LLM_MAX_TIME` rather than curl's byte-rate guard. Such gateways may send only
+sparse whitespace while a long prefill is running; treating that valid
+keepalive as a stalled response abandons work that can remain active behind the
+gateway. The byte-rate guard remains enabled for streaming calls, where emitted
+model data makes it meaningful.
+
+Only one layer should own transient retries. When Headlong retains its bounded
+`LLM_RETRIES`, configure an intermediate gateway deployment with zero retries.
+The gateway's upstream timeout must also expire before `LLM_MAX_TIME`, leaving
+time to return a typed failure instead of continuing work after the Headlong
+caller has disconnected. A process-level health response is insufficient for
+readiness: after changing this route, verify one real non-streaming inference
+and confirm that the model scheduler's waiting queue drains.
+
+Strict Codex Session analysis is bounded to 4,096 output tokens, one learning
+candidate of each kind, up to two Archive Candidates, and one Evidence Locator
+per conclusion.
+The model sees request-local short locator tokens constrained by the schema;
+Headlong resolves a selected token back to the canonical locator before writing
+the Activity Ledger. Do not put full encoded locators into the schema enum,
+because grammar compilation time grows with every repeated encoded value.
+Keep those semantic bounds aligned between the JSON Schema, local validator,
+and analysis prompt. Raising only the token ceiling makes long-session latency
+unbounded and can outlive the model subprocess timeout.
+
+Use the public recovery commands rather than editing durable files:
+
+```bash
+# Rebuild the native Markdown memory store from the Activity Ledger.
+headlong-assistant --identity observer native-memory rebuild
+
+# Restore one previously forgotten native memory by stable id.
+headlong-assistant --identity observer native-memory restore MEMORY_ID
+
+# Translate unresolved proposals, Archive Candidates, and Memory Candidates.
+# This writes a replaceable view; it never rewrites the Activity Ledger.
+headlong-assistant --identity observer localize-pending --language ko
+
+# Review and authorize an Archive Candidate, retry a failed authorized action,
+# or reverse it through Codex's public interface.
+headlong-assistant --identity observer archive-candidate list
+headlong-assistant --identity observer archive-candidate review CANDIDATE_ID --state accepted
+headlong-assistant --identity observer archive-session retry-candidate CANDIDATE_ID
+headlong-assistant --identity observer archive-session unarchive SESSION_ID
+```
+
+Archive and unarchive execution runs in the separately hardened
+`headlong-archive.service`. Web, CLI, and dashboard routes send an allowlisted
+request to `/run/headlong-archive/archive.sock`; the service independently
+verifies the signed Archive Directive or accepted Archive Candidate before it
+invokes Codex. The web and source-bridge units have read-only access to the
+default `CODEX_HOME`, and Observer thinkers cannot access the socket. The
+boundary retains Authority Journal signing access, while each external Codex
+child runs in a bubblewrap mount namespace with the journal masked and only
+`CODEX_HOME` writable. Setup installs bubblewrap; update repairs a missing
+installation. Assistant-service uninstall leaves this shared system package in
+place.
+
+The shipped boundary uses `CODEX_HOME=/opt/shellm/.codex`. When Codex state is
+elsewhere, set one absolute `CODEX_HOME` in `/etc/headlong/assistant.env` before
+running `deploy/update.sh`. The deploy renderer pins that same path into the
+boundary's writable allowlist and the web/bridge read-only allowlists; it
+refuses relative paths. Environment substitution does not make systemd
+filesystem allowlists dynamic, so rerun the update after changing this value.
+Setup and update never change the owner, group, mode, or ACLs of an existing
+external `CODEX_HOME`. Explicitly delegate the bounded session/archive access
+required by the `shellm` service account, then rerun the update:
+
+```bash
+sudo bash /opt/shellm/app/deploy/grant-codex-access.sh /home/operator/.codex shellm
+sudo bash /opt/shellm/app/deploy/update.sh
+```
+
+The delegation keeps the Codex home's owner unchanged, grants ACLs only on the
+home directory, session trees, and versioned state database, and deliberately
+excludes root auth/config files. Because POSIX ACL masks are reported in the
+group mode bits, `stat` no longer displays numeric mode `0700` after effective
+`shellm` access is granted; inspect `getfacl` for the actual per-user boundary.
+Do not recursively `chown` or `chmod` an operator's Codex state.
+The Codex bridge is skipped unless it can read and traverse both session roots;
+the archive boundary is skipped unless it can also write both roots. These
+conditions keep an undelegated external home fail-closed instead of starting a
+service that can only fail on its first archive request.
+
+Native HeadLong learning is intentionally autonomous: the thinker may add a
+memory without a review gate. Inspect, edit, forget, restore, or rebuild native
+memory through the existing memory surfaces. Add a stricter promotion rule only
+after a reproducible Memory Failure—wrong Knowledge Scope, contradiction with
+evidence, or a material degradation of a proposal or action. Duplication or
+awkward wording alone is quality feedback, not a Memory Failure. A
+behavior-affecting report must identify the concrete downstream proposal or
+native action step. Proposals retain their event Evidence Locators; native
+actions retain a stable root-trajectory step locator plus a compact immutable
+snapshot and content digest. Native memory capture is asynchronous, so the
+Proposal event or action step may precede the later memory-capture ledger row;
+the signed user report supplies the causal assertion instead of append order.
+
+Before enabling a new Observer, render and verify the shipped units without
+touching production:
+
+```bash
+bash tests/test_assistant_services.sh
+```
+
+The smoke renders `@SHELLM_HOME@` into a disposable unit directory and runs
+`systemd-analyze verify` there when systemd tooling is available.
 
 To remove only this supervision while preserving the Observer and normal
 HeadLong services:
@@ -173,8 +315,9 @@ wrapper that validates the action and identity name; the sudo rule in
 are installed by `setup.sh` and re-synced by `update.sh`. Useful commands:
 `systemctl status headlong-thinkers@audel` (who owns which processes),
 `journalctl -u headlong-thinkers@audel` (start/stop history). A dispatcher
-that dies on its own leaves the unit in a visible `failed` state — the unit
-deliberately does not auto-restart it.
+that dies on its own is restarted independently. Per-death and recovery notices
+come from the thinker hooks; after repeated unclean deaths exhaust the start
+limit, `headlong-thinkers-alert@audel` reports that the mind is staying down.
 
 **Kill switches, in escalating order:** Kill All button in the UI →
 `headlong-killall` on the box → `systemctl stop headlong-web` → stop the VM.

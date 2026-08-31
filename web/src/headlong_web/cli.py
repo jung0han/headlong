@@ -113,7 +113,10 @@ def _build_frontend() -> None:
     runtime = _js_runtime()
     print(f"Building frontend with {' '.join(runtime)} in {VIEWER_DIR} ...", file=sys.stderr)
     subprocess.run([*runtime, "install"], cwd=VIEWER_DIR, check=True)
-    subprocess.run([*runtime, "run", "build"], cwd=VIEWER_DIR, check=True)
+    build_runtime = [*runtime]
+    if Path(runtime[0]).name == "bun":
+        build_runtime.append("--bun")
+    subprocess.run([*build_runtime, "run", "build"], cwd=VIEWER_DIR, check=True)
     build_dir = VIEWER_DIR / "build" / "client"
     if not build_dir.is_dir():
         raise SystemExit(f"Frontend build output missing: {build_dir}")

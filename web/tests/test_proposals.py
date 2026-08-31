@@ -16,12 +16,7 @@ from headlong_web.server import create_app
 
 ROOT_TRAJ = "aaaaaaaa-1111-4111-8111-111111111111"
 SESSION_ID = "bbbbbbbb-2222-4222-8222-222222222222"
-SUPPORTED = {
-    "user_correction",
-    "test_failure",
-    "tool_failure",
-    "reviewer_finding",
-}
+STRONGEST = "reviewer_finding"
 
 
 class FakeLiteLLM:
@@ -42,32 +37,19 @@ class FakeLiteLLM:
                 )
                 signals = [
                     {
-                        "kind": kind,
-                        "content": f"Improve the work after this {kind}.",
+                        "kind": STRONGEST,
+                        "proposal_type": "work",
+                        "content": f"Improve the work after this {STRONGEST}.",
                         "evidence_locators": [locator],
                     }
-                    for kind in sorted(SUPPORTED)
                 ]
-                signals.extend(
-                    [
-                        {
-                            "kind": "inferred_pattern",
-                            "content": "An agent suspects a recurring pattern.",
-                            "evidence_locators": [locator],
-                        },
-                        {
-                            "kind": "open_loop",
-                            "content": "An agent suggested following up later.",
-                            "evidence_locators": [locator],
-                        },
-                    ]
-                )
                 result = {
                     "title": "Direct evidence found",
                     "observation": "The session contains reviewable direct evidence.",
                     "evidence_locators": [locator],
                     "memory_candidates": [],
                     "improvement_signals": signals,
+                    "archive_candidates": [],
                 }
                 payload = json.dumps(
                     {
@@ -167,10 +149,10 @@ def test_direct_evidence_becomes_reviewable_without_external_mutation(
         result = assistant.process_codex_once(active, archived)
 
     assert result["analysis"]["final"] == 1
-    assert result["analysis"]["work_proposals_created"] == 4
+    assert result["analysis"]["work_proposals_created"] == 1
     inbox = assistant.proposals()
-    assert len(inbox) == 4
-    assert {item["evidence_kind"] for item in inbox} == SUPPORTED
+    assert len(inbox) == 1
+    assert {item["evidence_kind"] for item in inbox} == {STRONGEST}
     assert {item["review_state"] for item in inbox} == {"pending"}
     assert {item["knowledge_scope"]["project_id"] for item in inbox} == {
         assistant.projects()[0].id
@@ -190,7 +172,7 @@ def test_direct_evidence_becomes_reviewable_without_external_mutation(
     identity_id = ".identities~observer"
     listed = client.get(f"/api/identities/{identity_id}/proposals")
     assert listed.status_code == 200
-    assert len(listed.json()) == 4
+    assert len(listed.json()) == 1
     proposal_id = inbox[0]["proposal_id"]
     detail = client.get(f"/api/identities/{identity_id}/proposals/{proposal_id}")
     assert detail.status_code == 200

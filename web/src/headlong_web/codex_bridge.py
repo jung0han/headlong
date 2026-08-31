@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 from uuid import UUID
@@ -23,8 +24,21 @@ class CodexBridgeError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class CodexSegment:
+    """One physical append-only rollout shard of a logical Codex Session."""
+
+    path: Path
+    source_root: str
+    relative_path: str
+    device: int
+    inode: int
+    start_at: datetime | None = None
+    end_at: datetime | None = None
+
+
+@dataclass(frozen=True)
 class CodexSource:
-    """One validated local file carrying a Codex Session stream."""
+    """One logical Codex Session, possibly persisted as ordered rollout shards."""
 
     id: str
     cwd: Path
@@ -35,6 +49,7 @@ class CodexSource:
     inode: int
     parent_session_id: str | None
     task_root_id: str
+    segments: tuple[CodexSegment, ...] = ()
 
 
 def discover_sources(
@@ -62,17 +77,27 @@ def discover_sources(
                 stat = path.stat()
             except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError):
                 continue
+            segment = CodexSegment(
+                path=path,
+                source_root=root_kind,
+                relative_path=path.relative_to(root).as_posix(),
+                device=stat.st_dev,
+                inode=stat.st_ino,
+                start_at=_event_time(first),
+                end_at=_event_time(_last_complete_line(path)),
+            )
             found.append(
                 CodexSource(
                     id=session_id,
                     cwd=cwd,
-                    path=path,
-                    source_root=root_kind,
-                    relative_path=path.relative_to(root).as_posix(),
-                    device=stat.st_dev,
-                    inode=stat.st_ino,
+                    path=segment.path,
+                    source_root=segment.source_root,
+                    relative_path=segment.relative_path,
+                    device=segment.device,
+                    inode=segment.inode,
                     parent_session_id=parent_session_id,
                     task_root_id=session_id,
+                    segments=(segment,),
                 )
             )
 
@@ -87,19 +112,29 @@ def discover_sources(
         if any(
             candidate.cwd != first.cwd
             or candidate.parent_session_id != first.parent_session_id
-            or not _files_share_prefix(first.path, candidate.path)
             for candidate in candidates[1:]
         ):
             errors.append(f"conflicting Codex Session identity: {session_id}")
             continue
         try:
+            representatives: list[CodexSource] = []
+            for candidate in sorted(candidates, key=_source_preference, reverse=True):
+                if any(
+                    _files_share_prefix(candidate.path, existing.path)
+                    for existing in representatives
+                ):
+                    continue
+                representatives.append(candidate)
+            ordered = _ordered_shards(representatives)
+            if ordered is None:
+                errors.append(f"conflicting Codex Session identity: {session_id}")
+                continue
+            latest = ordered[-1]
             selected.append(
-                max(
-                    candidates,
-                    key=lambda candidate: (
-                        candidate.path.stat().st_size,
-                        candidate.source_root == "archived",
-                        str(candidate.path),
+                replace(
+                    latest,
+                    segments=tuple(
+                        source_segments(candidate)[0] for candidate in ordered
                     ),
                 )
             )
@@ -114,6 +149,65 @@ def discover_sources(
             continue
         resolved.append(replace(source, task_root_id=task_root_id))
     return resolved, errors
+
+
+def source_segments(source: CodexSource) -> tuple[CodexSegment, ...]:
+    """Return the source's physical shards in logical append order."""
+    if source.segments:
+        return source.segments
+    return (
+        CodexSegment(
+            path=source.path,
+            source_root=source.source_root,
+            relative_path=source.relative_path,
+            device=source.device,
+            inode=source.inode,
+        ),
+    )
+
+
+def segment_source(source: CodexSource, segment: CodexSegment) -> CodexSource:
+    """Address one physical shard while preserving logical session identity."""
+    return replace(
+        source,
+        path=segment.path,
+        source_root=segment.source_root,
+        relative_path=segment.relative_path,
+        device=segment.device,
+        inode=segment.inode,
+        segments=source_segments(source),
+    )
+
+
+def cursor_segment_index(
+    source: CodexSource, cursor: dict[str, Any] | None
+) -> int | None:
+    """Resolve a durable cursor to its physical shard without trusting filenames."""
+    if cursor is None:
+        return None
+    canonical = cursor.get("canonical_path")
+    source_root = cursor.get("source_root")
+    relative_path = cursor.get("relative_path")
+    for index, segment in enumerate(source_segments(source)):
+        if canonical == str(segment.path.resolve()) or (
+            source_root == segment.source_root
+            and relative_path == segment.relative_path
+        ):
+            return index
+    return None
+
+
+def source_has_delta(source: CodexSource, cursor: dict[str, Any] | None) -> bool:
+    """Return whether any physical shard has uncollected complete or partial bytes."""
+    segments = source_segments(source)
+    if cursor is None:
+        return any(segment.path.stat().st_size for segment in segments)
+    index = cursor_segment_index(source, cursor)
+    if index is None:
+        return True
+    current = segment_source(source, segments[index])
+    offset, _line = resume_position(current, cursor)
+    return current.path.stat().st_size > offset or index < len(segments) - 1
 
 
 def _parent_session_id(meta: dict[str, Any]) -> str | None:
@@ -224,6 +318,40 @@ def _files_share_prefix(left: Path, right: Path) -> bool:
     return True
 
 
+def _source_preference(source: CodexSource) -> tuple[int, bool, str]:
+    return (
+        source.path.stat().st_size,
+        source.source_root == "archived",
+        str(source.path),
+    )
+
+
+def _ordered_shards(sources: list[CodexSource]) -> list[CodexSource] | None:
+    """Order only provably disjoint rollout files; ambiguity remains fail-closed."""
+    if len(sources) == 1:
+        return list(sources)
+    if any(
+        source_segments(source)[0].start_at is None
+        or source_segments(source)[0].end_at is None
+        or source_segments(source)[0].start_at
+        > source_segments(source)[0].end_at
+        for source in sources
+    ):
+        return None
+    ordered = sorted(
+        sources,
+        key=lambda source: source_segments(source)[0].start_at or datetime.min.replace(
+            tzinfo=timezone.utc
+        ),
+    )
+    for earlier, later in zip(ordered, ordered[1:]):
+        earlier_end = source_segments(earlier)[0].end_at
+        later_start = source_segments(later)[0].start_at
+        if earlier_end is None or later_start is None or earlier_end >= later_start:
+            return None
+    return ordered
+
+
 def _first_complete_line(path: Path) -> bytes | None:
     try:
         with path.open("rb") as fh:
@@ -231,6 +359,42 @@ def _first_complete_line(path: Path) -> bytes | None:
     except OSError:
         return None
     return raw if raw.endswith(b"\n") else None
+
+
+def _last_complete_line(path: Path) -> bytes | None:
+    try:
+        with path.open("rb") as fh:
+            fh.seek(0, 2)
+            position = fh.tell()
+            pending = b""
+            while position:
+                amount = min(_READ_CHUNK, position)
+                position -= amount
+                fh.seek(position)
+                pending = fh.read(amount) + pending
+                complete = [
+                    raw
+                    for raw in pending.splitlines(keepends=True)
+                    if raw.endswith(b"\n")
+                ]
+                if complete and (position == 0 or len(complete) > 1):
+                    return complete[-1]
+    except OSError:
+        return None
+    return None
+
+
+def _event_time(raw: bytes | None) -> datetime | None:
+    if raw is None:
+        return None
+    try:
+        value = json.loads(raw).get("timestamp")
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(timezone.utc)
 
 
 def _canonical_uuid(value: Any) -> str:

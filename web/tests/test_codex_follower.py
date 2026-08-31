@@ -60,6 +60,55 @@ def _follow(root: Path, active: Path, archived: Path) -> int:
     )
 
 
+def test_large_session_backlog_yields_after_one_bounded_collection_batch(
+    tmp_path: Path, capsys
+):
+    root = tmp_path / "headlong"
+    root.mkdir()
+    identity = _identity(root)
+    project = tmp_path / "registered"
+    project.mkdir()
+    active = tmp_path / "codex" / "sessions"
+    archived = tmp_path / "codex" / "archived_sessions"
+    active.mkdir(parents=True)
+    session = active / "large.jsonl"
+    rows = [_meta(SESSION_ID, project)] + [
+        _row({"type": "event_msg", "payload": {"sequence": index}})
+        for index in range(34)
+    ]
+    session.write_bytes(b"\n".join(rows) + b"\n")
+
+    assert _command(root, "project", "add", str(project)) == 0
+    capsys.readouterr()
+    assert _follow(root, active, archived) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first["appended"] == 32
+    assert first["deferred"] == 1
+    cursor = json.loads(
+        (
+            identity
+            / "assistant"
+            / "cursors"
+            / "codex"
+            / f"{SESSION_ID}.json"
+        ).read_text()
+    )
+    assert cursor["line"] == 32
+
+    assert _follow(root, active, archived) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert second["appended"] == 3
+    assert second["deferred"] == 0
+    ledger = identity / "trajectories" / "aaaaaaaa-root" / "trajectory.jsonl"
+    source_events = [
+        event
+        for event in map(json.loads, ledger.read_text().splitlines())
+        if event.get("type") == "activity-source-event"
+    ]
+    assert len(source_events) == 35
+    assert len({event["event_id"] for event in source_events}) == 35
+
+
 def test_active_session_append_partial_line_and_restart_are_lossless_and_idempotent(
     tmp_path: Path, capsys
 ):
@@ -298,6 +347,132 @@ def test_duplicate_session_identity_uses_one_compatible_stream_and_reports_confl
     repeated = json.loads(capsys.readouterr().out)
     assert repeated["appended"] == 0
     assert repeated["duplicate"] == 0
+
+
+def test_non_overlapping_rollout_shards_form_one_lossless_session(
+    tmp_path: Path, capsys
+):
+    root = tmp_path / "headlong"
+    root.mkdir()
+    identity = _identity(root)
+    project = tmp_path / "registered"
+    project.mkdir()
+    active = tmp_path / "codex" / "sessions"
+    archived = tmp_path / "codex" / "archived_sessions"
+    active.mkdir(parents=True)
+    archived.mkdir(parents=True)
+
+    def timed_meta(timestamp: str) -> bytes:
+        return _row(
+            {
+                "timestamp": timestamp,
+                "type": "session_meta",
+                "payload": {"id": SESSION_ID, "cwd": str(project)},
+            }
+        ) + b"\n"
+
+    def timed_event(timestamp: str, value: str) -> bytes:
+        return _row(
+            {
+                "timestamp": timestamp,
+                "type": "event_msg",
+                "payload": {"type": "agent_message", "message": value},
+            }
+        ) + b"\n"
+
+    first_path = active / "rollout-first.jsonl"
+    second_path = active / "rollout-second.jsonl"
+    first_bytes = timed_meta("2026-08-30T00:00:00Z") + timed_event(
+        "2026-08-30T00:01:00Z", "first shard"
+    )
+    second_bytes = timed_meta("2026-08-30T00:02:00Z") + timed_event(
+        "2026-08-30T00:03:00Z", "second shard"
+    )
+    first_path.write_bytes(first_bytes)
+    second_path.write_bytes(second_bytes)
+
+    assert _command(root, "project", "add", str(project)) == 0
+    capsys.readouterr()
+    assert _follow(root, active, archived) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first["errors"] == []
+    assert first["discovered"] == 1
+    assert first["eligible"] == 1
+    assert first["appended"] == 4
+
+    cursor_path = (
+        identity / "assistant" / "cursors" / "codex" / f"{SESSION_ID}.json"
+    )
+    cursor = json.loads(cursor_path.read_text())
+    assert cursor["relative_path"] == second_path.name
+    assert cursor["byte_offset"] == len(second_bytes)
+    assert cursor["line"] == 2
+
+    state_path = (
+        identity / "assistant" / "analysis" / "codex" / f"{SESSION_ID}.json"
+    )
+    state = json.loads(state_path.read_text())
+    assert state["source_revision_digest"] == hashlib.sha256(
+        first_bytes + second_bytes
+    ).hexdigest()
+
+    appended = timed_event("2026-08-30T00:04:00Z", "later append")
+    with second_path.open("ab") as stream:
+        stream.write(appended)
+    assert _follow(root, active, archived) == 0
+    repeated = json.loads(capsys.readouterr().out)
+    assert repeated["errors"] == []
+    assert repeated["appended"] == 1
+    assert repeated["duplicate"] == 0
+
+    state = json.loads(state_path.read_text())
+    assert state["source_revision_digest"] == hashlib.sha256(
+        first_bytes + second_bytes + appended
+    ).hexdigest()
+
+
+def test_overlapping_rollout_shards_remain_a_conflict(tmp_path: Path, capsys):
+    root = tmp_path / "headlong"
+    root.mkdir()
+    _identity(root)
+    project = tmp_path / "registered"
+    project.mkdir()
+    active = tmp_path / "codex" / "sessions"
+    archived = tmp_path / "codex" / "archived_sessions"
+    active.mkdir(parents=True)
+    archived.mkdir(parents=True)
+
+    def row(timestamp: str, *, meta: bool, value: str = "") -> bytes:
+        payload = (
+            {"id": CONFLICT_ID, "cwd": str(project)}
+            if meta
+            else {"type": "agent_message", "message": value}
+        )
+        return _row(
+            {
+                "timestamp": timestamp,
+                "type": "session_meta" if meta else "event_msg",
+                "payload": payload,
+            }
+        ) + b"\n"
+
+    (active / "overlap-first.jsonl").write_bytes(
+        row("2026-08-30T00:00:00Z", meta=True)
+        + row("2026-08-30T00:03:00Z", meta=False, value="first")
+    )
+    (active / "overlap-second.jsonl").write_bytes(
+        row("2026-08-30T00:02:00Z", meta=True)
+        + row("2026-08-30T00:04:00Z", meta=False, value="second")
+    )
+
+    assert _command(root, "project", "add", str(project)) == 0
+    capsys.readouterr()
+    assert _follow(root, active, archived) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["errors"] == [
+        f"conflicting Codex Session identity: {CONFLICT_ID}"
+    ]
+    assert result["status"] == "degraded"
 
 
 def test_restart_after_ledger_append_before_cursor_save_replays_idempotently(

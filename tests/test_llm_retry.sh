@@ -240,6 +240,23 @@ out=$(LLM_RETRIES=1 run_llm)
 check "marker: streamed success -> ok=true" bash -c 'jq -e ".ok == true" "$1" >/dev/null' _ "$HF"
 
 # ---------------------------------------------------------------------------
+# The low-speed guard is streaming-only. Non-streaming OpenAI-compatible
+# servers may send sparse whitespace keepalives until the final JSON response;
+# applying curl's byte-rate guard there aborts healthy long-running requests.
+# ---------------------------------------------------------------------------
+
+reset "sse-ok"
+: > "$CURL_ARGS_FILE"
+LLM_RETRIES=0 LLM_SPEED_LIMIT=100 LLM_SPEED_TIME=60 run_llm >/dev/null
+check "stream uses low-speed guard" grep -qx -- "--speed-limit" "$CURL_ARGS_FILE"
+
+reset "http-200"
+: > "$CURL_ARGS_FILE"
+LLM_RETRIES=0 LLM_SPEED_LIMIT=100 LLM_SPEED_TIME=60 run_llm --no-stream >/dev/null
+check_not "non-stream skips low-speed guard" grep -qx -- "--speed-limit" "$CURL_ARGS_FILE"
+check "non-stream keeps total timeout" grep -qx -- "--max-time" "$CURL_ARGS_FILE"
+
+# ---------------------------------------------------------------------------
 # Non-streaming: embedded failures inside a 200 body are not silent successes
 # ---------------------------------------------------------------------------
 

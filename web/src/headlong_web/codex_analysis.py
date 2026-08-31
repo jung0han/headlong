@@ -10,12 +10,150 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from headlong_web.model_gateway import StructuredResultSchema
+
 ANALYSIS_SCHEMA = "headlong.codex-observation/v1"
 ANALYSIS_STATE_SCHEMA = "headlong.codex-analysis-state/v1"
 PROVISIONAL_AFTER = timedelta(minutes=5)
 FINAL_AFTER = timedelta(minutes=30)
+RETRY_BASE = timedelta(minutes=1)
+RETRY_MAX = timedelta(minutes=15)
 MAX_TITLE = 160
 MAX_CONTENT = 1200
+MAX_FINDINGS = 1
+MAX_ARCHIVE_CANDIDATES = 2
+MAX_EVIDENCE_LOCATORS = 1
+
+
+def result_schema(allowed: dict[str, dict[str, Any]]) -> StructuredResultSchema:
+    """Return the provider and local contract for one Codex source revision."""
+    locator = {"type": "string", "enum": sorted(allowed)}
+    locators = {
+        "type": "array",
+        "items": locator,
+        "minItems": 1,
+        "maxItems": MAX_EVIDENCE_LOCATORS,
+    }
+    finding = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "content": {"type": "string", "minLength": 1, "maxLength": MAX_CONTENT},
+            "evidence_locators": locators,
+        },
+        "required": ["content", "evidence_locators"],
+    }
+    signal = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "kind": {
+                "type": "string",
+                "enum": [
+                    "user_correction",
+                    "test_failure",
+                    "tool_failure",
+                    "reviewer_finding",
+                    "observer_failure",
+                    "observer_regression",
+                    "inferred_pattern",
+                    "open_loop",
+                ],
+            },
+            "proposal_type": {"type": "string", "enum": ["work", "observer"]},
+            "content": {"type": "string", "minLength": 1, "maxLength": MAX_CONTENT},
+            "evidence_locators": locators,
+        },
+        "required": ["kind", "proposal_type", "content", "evidence_locators"],
+    }
+    archive_candidate = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "completion_state": {"type": "string", "enum": ["completed"]},
+            "rationale": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": MAX_CONTENT,
+            },
+            "evidence_locators": locators,
+        },
+        "required": ["completion_state", "rationale", "evidence_locators"],
+    }
+    document = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "title": {"type": "string", "minLength": 1, "maxLength": MAX_TITLE},
+            "observation": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": MAX_CONTENT,
+            },
+            "evidence_locators": locators,
+            "memory_candidates": {
+                "type": "array",
+                "items": finding,
+                "maxItems": MAX_FINDINGS,
+            },
+            "improvement_signals": {
+                "type": "array",
+                "items": signal,
+                "maxItems": MAX_FINDINGS,
+            },
+            "archive_candidates": {
+                "type": "array",
+                "items": archive_candidate,
+                "maxItems": MAX_ARCHIVE_CANDIDATES,
+            },
+        },
+        "required": [
+            "title",
+            "observation",
+            "evidence_locators",
+            "memory_candidates",
+            "improvement_signals",
+            "archive_candidates",
+        ],
+    }
+    return StructuredResultSchema(
+        name="codex_session_analysis",
+        document=document,
+        validate=lambda value: validate_result(value, allowed),
+    )
+
+
+def completed_result_schema() -> StructuredResultSchema:
+    """Return the compatibility contract for the public completed-session command."""
+    document = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "title": {"type": "string", "minLength": 1, "maxLength": MAX_TITLE},
+            "observation": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": MAX_CONTENT,
+            },
+        },
+        "required": ["title", "observation"],
+    }
+    return StructuredResultSchema(
+        name="completed_codex_session_analysis",
+        document=document,
+        validate=_validate_completed_result,
+    )
+
+
+def _validate_completed_result(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {"title", "observation"}:
+        raise AnalysisContractError("model observation does not match the required schema")
+    return {
+        "title": _compact_text(value["title"], MAX_TITLE, "observation title"),
+        "observation": _compact_text(
+            value["observation"], MAX_CONTENT, "observation"
+        ),
+    }
 
 
 class AnalysisContractError(ValueError):
@@ -30,6 +168,7 @@ def validate_result(value: Any, allowed: dict[str, dict[str, Any]]) -> dict[str,
         "evidence_locators",
         "memory_candidates",
         "improvement_signals",
+        "archive_candidates",
     }
     if not isinstance(value, dict) or set(value) != expected:
         raise AnalysisContractError("model analysis does not match the required schema")
@@ -47,17 +186,61 @@ def validate_result(value: Any, allowed: dict[str, dict[str, Any]]) -> dict[str,
         "improvement_signals": _findings(
             value["improvement_signals"], allowed, signal=True
         ),
+        "archive_candidates": _archive_candidates(
+            value["archive_candidates"], allowed
+        ),
     }
+
+
+def _archive_candidates(
+    values: Any, allowed: dict[str, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    if not isinstance(values, list) or len(values) > MAX_ARCHIVE_CANDIDATES:
+        raise AnalysisContractError("model Archive Candidates must be a bounded array")
+    output: list[dict[str, Any]] = []
+    expected = {"completion_state", "rationale", "evidence_locators"}
+    for value in values:
+        if not isinstance(value, dict) or set(value) != expected:
+            raise AnalysisContractError("model Archive Candidate does not match the schema")
+        if value["completion_state"] != "completed":
+            raise AnalysisContractError("model Archive Candidate has an unsupported claim")
+        output.append(
+            {
+                "completion_state": "completed",
+                "rationale": _compact_text(
+                    value["rationale"], MAX_CONTENT, "Archive Candidate rationale"
+                ),
+                "evidence_locators": _locators(
+                    value["evidence_locators"], allowed, "Archive Candidate"
+                ),
+            }
+        )
+    return output
 
 
 def due_kind(state: dict[str, Any], source_root: str, now: datetime) -> str | None:
     """Return the one analysis kind due for this revision, if any."""
     inactive = now - parse_time(state["last_activity_at"])
     if source_root == "archived" or inactive >= FINAL_AFTER:
-        return None if state.get("final_event_id") else "final"
-    if inactive >= PROVISIONAL_AFTER:
-        return None if state.get("provisional_event_id") else "provisional"
-    return None
+        analysis_kind = None if state.get("final_event_id") else "final"
+    elif inactive >= PROVISIONAL_AFTER:
+        analysis_kind = None if state.get("provisional_event_id") else "provisional"
+    else:
+        analysis_kind = None
+    if analysis_kind is None or state.get("failed_analysis_kind") != analysis_kind:
+        return analysis_kind
+    retry_at = state.get("next_retry_at")
+    if retry_at and now < parse_time(retry_at):
+        return None
+    return analysis_kind
+
+
+def retry_after(now: datetime, consecutive_failures: int) -> datetime:
+    """Return the bounded exponential retry time for one failed revision."""
+    failures = max(1, int(consecutive_failures))
+    exponent = min(failures - 1, 4)
+    delay = min(RETRY_BASE * (2**exponent), RETRY_MAX)
+    return now + delay
 
 
 def supersedes(state: dict[str, Any], analysis_kind: str) -> list[str]:
@@ -78,6 +261,8 @@ def health(state: dict[str, Any]) -> dict[str, Any]:
         "last_activity_at": state["last_activity_at"],
         "status": state["status"],
         "last_error": state.get("last_error"),
+        "consecutive_failures": int(state.get("consecutive_failures") or 0),
+        "next_retry_at": state.get("next_retry_at"),
     }
 
 
@@ -101,7 +286,7 @@ def _findings(
     *,
     signal: bool,
 ) -> list[dict[str, Any]]:
-    if not isinstance(values, list) or len(values) > 20:
+    if not isinstance(values, list) or len(values) > MAX_FINDINGS:
         raise AnalysisContractError("model analysis findings must be a bounded array")
     output: list[dict[str, Any]] = []
     allowed_kinds = {
@@ -115,15 +300,12 @@ def _findings(
         "open_loop",
     }
     finding_fields = {"kind", "content", "evidence_locators"}
-    expected = finding_fields if signal else {
+    expected = finding_fields | {"proposal_type"} if signal else {
         "content",
         "evidence_locators",
     }
     for value in values:
-        if not isinstance(value, dict) or (
-            set(value) != expected
-            and (not signal or set(value) != finding_fields | {"proposal_type"})
-        ):
+        if not isinstance(value, dict) or set(value) != expected:
             raise AnalysisContractError("model analysis finding does not match the schema")
         item = {
             "content": _compact_text(value["content"], MAX_CONTENT, "analysis finding"),
@@ -137,7 +319,7 @@ def _findings(
                     "model analysis signal has an unsupported kind"
                 )
             item["kind"] = value["kind"]
-            proposal_type = value.get("proposal_type", "work")
+            proposal_type = value["proposal_type"]
             if proposal_type not in {"work", "observer"}:
                 raise AnalysisContractError(
                     "model analysis signal has an unsupported proposal type"
@@ -152,7 +334,11 @@ def _locators(
     allowed: dict[str, dict[str, Any]],
     field: str,
 ) -> list[dict[str, Any]]:
-    if not isinstance(values, list) or not values or len(values) > 50:
+    if (
+        not isinstance(values, list)
+        or not values
+        or len(values) > MAX_EVIDENCE_LOCATORS
+    ):
         raise AnalysisContractError(
             f"{field} requires a bounded Evidence Locator array"
         )

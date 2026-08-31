@@ -11,8 +11,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from headlong_web import envfile
+from headlong_web import envfile, operational_health
 from headlong_web.assistant import AssistantError, PersonalAssistant
+from headlong_web.codex_scheduler import HEALTH_SCHEMA as SCHEDULER_HEALTH_SCHEMA
 from headlong_web.discovery import IdentityInfo
 
 
@@ -55,9 +56,10 @@ def run_bridge(
         try:
             if bridge == "codex":
                 assert active_root is not None and archived_root is not None
-                result = assistant.process_codex_once(active_root, archived_root)
-                degraded = any(
-                    section.get("status") != "ok" for section in result.values()
+                result = process_codex_cycle(assistant, active_root, archived_root)
+                degraded = result.get("status") == "degraded" or any(
+                    result.get(section, {}).get("status") != "ok"
+                    for section in ("collection", "analysis")
                 )
             else:
                 result = assistant.observe_web_once()
@@ -103,12 +105,23 @@ def public_health(root: Path, identity: IdentityInfo) -> dict[str, Any]:
     )
     cursors = _codex_cursors(state / "cursors" / "codex")
     codex_runtime = _runtime_marker(state, "codex")
+    codex_scheduling = _codex_scheduling(state / "source-health" / "codex-scheduling.json")
     web_runtime = _runtime_marker(state, "web")
     web_sources = _web_source_health(state / "source-health")
     storage = _storage_health(state)
+    operations = {
+        "native_memory_capture": _native_memory_capture(
+            state / "source-health" / "native-memory.json"
+        ),
+        "structured_results": _structured_results(
+            model, state / "source-health" / "structured-results.json"
+        ),
+        **_archive_health(state / "source-health" / "archive.json"),
+    }
     sources = {
         "codex": {
             "runtime": codex_runtime,
+            "scheduling": codex_scheduling,
             "cursor_count": cursors["total"],
             "cursors": cursors["items"],
             "truncated": cursors["truncated"],
@@ -123,11 +136,29 @@ def public_health(root: Path, identity: IdentityInfo) -> dict[str, Any]:
     states = [
         model.get("status"),
         codex_runtime.get("status"),
+        codex_scheduling.get("status"),
         web_runtime.get("status"),
     ]
     if storage["status"] != "ok" or "error" in states:
         status = "error"
+    elif any(
+        item["status"] == "error"
+        for item in (
+            operations["native_memory_capture"],
+            operations["archive_candidate_review"],
+            operations["archive_execution"],
+        )
+    ):
+        status = "error"
     elif any(item in {"degraded", "unknown", "starting", "stopped"} for item in states):
+        status = "degraded"
+    elif any(
+        item["status"] == "degraded"
+        for item in (
+            operations["structured_results"],
+            operations["archive_execution"],
+        )
+    ):
         status = "degraded"
     else:
         status = "ok"
@@ -137,8 +168,22 @@ def public_health(root: Path, identity: IdentityInfo) -> dict[str, Any]:
         "identity": {"id": identity.id, "name": identity.name},
         "model_route": model,
         "sources": sources,
+        "operations": operations,
         "storage": storage,
     }
+
+
+def process_codex_cycle(
+    assistant: PersonalAssistant,
+    active_root: Path,
+    archived_root: Path,
+    *,
+    capacity: int | None = None,
+) -> dict[str, Any]:
+    """Public one-cycle runtime seam used by services and product tests."""
+    return assistant.schedule_codex_once(
+        active_root, archived_root, capacity=capacity
+    )
 
 
 def _install_signal_handlers(stop_event: threading.Event) -> None:
@@ -192,12 +237,59 @@ def _runtime_marker(state: Path, bridge: str) -> dict[str, Any]:
     }
 
 
+def _codex_scheduling(path: Path) -> dict[str, Any]:
+    value = _read_object(path)
+    if value.get("schema") != SCHEDULER_HEALTH_SCHEMA:
+        return {
+            "status": "unknown",
+            "backlog_size": 0,
+            "failures": 0,
+            **{
+                lane: {
+                    "backlog": 0,
+                    "failures": 0,
+                    "last_progress_at": None,
+                }
+                for lane in (
+                    "active_collection",
+                    "newly_eligible_analysis",
+                    "historical_backfill",
+                )
+            },
+        }
+    result: dict[str, Any] = {
+        "status": _choice(value.get("status"), {"ok", "degraded"}, "unknown"),
+        "updated_at": _timestamp(value.get("updated_at")),
+        "last_progress_at": _timestamp(value.get("last_progress_at")),
+        "backlog_size": _nonnegative_int(value.get("backlog_size")),
+        "failures": _nonnegative_int(value.get("failures")),
+    }
+    for lane in (
+        "active_collection",
+        "newly_eligible_analysis",
+        "historical_backfill",
+    ):
+        item = value.get(lane)
+        item = item if isinstance(item, dict) else {}
+        result[lane] = {
+            "backlog": _nonnegative_int(item.get("backlog")),
+            "failures": _nonnegative_int(item.get("failures")),
+            "last_progress_at": _timestamp(item.get("last_progress_at")),
+        }
+    return result
+
+
 def _model_route(path: Path, secrets: set[str]) -> dict[str, Any]:
     value = _read_object(path)
     route = value.get("route") if isinstance(value.get("route"), dict) else {}
     paths = value.get("paths") if isinstance(value.get("paths"), dict) else {}
     direct = paths.get("direct") if isinstance(paths.get("direct"), dict) else {}
     shellm = paths.get("shellm") if isinstance(paths.get("shellm"), dict) else {}
+    structured = (
+        route.get("structured_results")
+        if isinstance(route.get("structured_results"), dict)
+        else {}
+    )
     if not value or not isinstance(value.get("ok"), bool):
         return {"status": "unknown", "checked_at": None, "route": {}, "paths": {}}
     return {
@@ -211,6 +303,16 @@ def _model_route(path: Path, secrets: set[str]) -> dict[str, Any]:
                 {"provider-default", "LLM_API_URL", "SHELLM_API_URL"},
                 "unknown",
             ),
+            "structured_results": {
+                "mode": _choice(
+                    structured.get("mode"), {"strict", "json_object"}, "unknown"
+                ),
+                "source": _choice(
+                    structured.get("source"),
+                    {"configured", "route_default"},
+                    "unknown",
+                ),
+            },
         },
         "paths": {
             "direct": {
@@ -319,6 +421,107 @@ def _storage_health(state: Path) -> dict[str, Any]:
             "limit_configured": configured,
             "remaining_bytes": None,
         }
+
+
+def _native_memory_capture(path: Path) -> dict[str, Any]:
+    value = _read_object(path)
+    mutations = value.get("mutations") if isinstance(value.get("mutations"), dict) else {}
+    if value.get("schema") != operational_health.NATIVE_MEMORY_SCHEMA:
+        return {
+            "status": "unknown" if not value else "error",
+            "active": None,
+            "mutations": {
+                kind: 0 for kind in ("added", "edited", "forgotten", "restored")
+            },
+            "last_mutation_at": None,
+        }
+    return {
+        "status": _choice(value.get("status"), {"ok", "error"}, "error"),
+        "active": _nonnegative_int(value.get("active")),
+        "mutations": {
+            kind: _nonnegative_int(mutations.get(kind))
+            for kind in ("added", "edited", "forgotten", "restored")
+        },
+        "last_mutation_at": _timestamp(value.get("last_mutation_at")),
+    }
+
+
+def _structured_results(model: dict[str, Any], path: Path) -> dict[str, Any]:
+    route = model.get("route") if isinstance(model.get("route"), dict) else {}
+    structured = (
+        route.get("structured_results")
+        if isinstance(route.get("structured_results"), dict)
+        else {}
+    )
+    route_mode = _choice(structured.get("mode"), {"strict", "json_object"}, "unknown")
+    value = _read_object(path)
+    if value.get("schema") != operational_health.STRUCTURED_RESULT_SCHEMA:
+        return {
+            "status": "error" if model.get("status") == "error" else "unknown",
+            "mode": route_mode,
+            "failures": 0,
+            "last_failure_at": None,
+        }
+    return {
+        "status": _choice(value.get("status"), {"ok", "degraded", "error"}, "error"),
+        "mode": _choice(value.get("mode"), {"strict", "json_object"}, route_mode),
+        "failures": _nonnegative_int(value.get("failures")),
+        "last_failure_at": _timestamp(value.get("last_failure_at")),
+    }
+
+
+def _archive_health(path: Path) -> dict[str, dict[str, Any]]:
+    counts = {state: 0 for state in ("pending", "accepted", "rejected", "dismissed")}
+    states = {
+        state: 0
+        for state in (
+            "succeeded",
+            "already_done",
+            "failed",
+            "timeout",
+            "unsupported",
+            "indeterminate",
+        )
+    }
+    value = _read_object(path)
+    if not value:
+        return {
+            "archive_candidate_review": {
+                "status": "ok", "total": 0, **counts, "last_review_at": None
+            },
+            "archive_execution": {
+                "status": "idle", "attempts": 0, **states, "last_attempt_at": None
+            },
+        }
+    review = value.get("candidate_review") if isinstance(value.get("candidate_review"), dict) else {}
+    execution = value.get("execution") if isinstance(value.get("execution"), dict) else {}
+    if value.get("schema") != operational_health.ARCHIVE_SCHEMA:
+        return {
+            "archive_candidate_review": {
+                "status": "error", "total": 0, **counts, "last_review_at": None
+            },
+            "archive_execution": {
+                "status": "error", "attempts": 0, **states, "last_attempt_at": None
+            },
+        }
+    return {
+        "archive_candidate_review": {
+            "status": _choice(
+                review.get("status"), {"ok", "pending", "error"}, "error"
+            ),
+            "total": _nonnegative_int(review.get("total")),
+            **{state: _nonnegative_int(review.get(state)) for state in counts},
+            "last_review_at": _timestamp(review.get("last_review_at")),
+        },
+        "archive_execution": {
+            "status": _choice(
+                execution.get("status"), {"idle", "ok", "degraded", "error"}, "error"
+            ),
+            "attempts": _nonnegative_int(execution.get("attempts")),
+            **{state: _nonnegative_int(execution.get(state)) for state in states},
+            "last_attempt_at": _timestamp(execution.get("last_attempt_at")),
+        },
+    }
 
 
 def _tree_bytes(roots: tuple[Path, ...]) -> tuple[int, bool]:

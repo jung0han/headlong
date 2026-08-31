@@ -47,6 +47,7 @@ class FakeLiteLLM:
                             }
                         ],
                         "improvement_signals": [],
+                        "archive_candidates": [],
                     }
                 )
                 payload = json.dumps(

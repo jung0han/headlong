@@ -11,8 +11,23 @@ set -euo pipefail
 APP_DIR="${APP_DIR:-/opt/shellm/app}"
 UNIT_DST="${UNIT_DST:-/etc/systemd/system/headlong-web.service}"
 
+if [[ ! -x /usr/bin/bwrap ]]; then
+    echo "==> Installing bubblewrap for archive child-process isolation"
+    sudo apt-get install -y -qq bubblewrap
+fi
+if ! command -v setfacl >/dev/null 2>&1; then
+    echo "==> Installing ACL tools for explicit external Codex access"
+    sudo apt-get install -y -qq acl
+fi
+
 echo "==> Pulling latest"
 sudo -u shellm git -C "$APP_DIR" pull --ff-only
+
+# Hardened services cannot mutate the app tree or shellm's uv cache. Resolve
+# and install the web environment before starting them, then let their launch
+# paths execute the synchronized console scripts directly.
+echo "==> Synchronizing web environment"
+sudo -u shellm bash -c "export PATH=\"\$HOME/.local/bin:\$PATH\"; cd '$APP_DIR/web' && uv sync"
 
 # The headlong rename moved every unit from shelly-* to headlong-*. That
 # cutover restarts the identity dispatchers, so it must never happen as a
@@ -35,13 +50,51 @@ fi
 # (drop-ins survive this); hand-edits to the main unit will be overwritten.
 UNIT_SRC="$APP_DIR/deploy/headlong-web.service"
 SHELLM_HOME="${SHELLM_HOME:-$(dirname "$APP_DIR")}"
+CODEX_HOME="${CODEX_HOME:-}"
+if [[ -z "$CODEX_HOME" && -f /etc/headlong/assistant.env ]]; then
+    CODEX_HOME=$(sed -n 's/^[[:space:]]*CODEX_HOME[[:space:]]*=[[:space:]]*//p' /etc/headlong/assistant.env | tail -1)
+    CODEX_HOME="${CODEX_HOME%\"}"; CODEX_HOME="${CODEX_HOME#\"}"
+    CODEX_HOME="${CODEX_HOME%\'}"; CODEX_HOME="${CODEX_HOME#\'}"
+fi
+CODEX_HOME="${CODEX_HOME:-$SHELLM_HOME/.codex}"
+[[ "$CODEX_HOME" =~ ^/[A-Za-z0-9._/-]+$ \
+   && "$CODEX_HOME" != *"/../"* && "$CODEX_HOME" != */.. \
+   && "$CODEX_HOME" != *"/./"* && "$CODEX_HOME" != */. \
+   && "$CODEX_HOME" != *"//"* ]] \
+    || { echo "==> ERROR: CODEX_HOME must be a normalized absolute path" >&2; exit 1; }
 if [[ -f "$UNIT_SRC" ]]; then
-    rendered=$(sed "s|@SHELLM_HOME@|$SHELLM_HOME|g" "$UNIT_SRC")
+    rendered=$(sed -e "s|@SHELLM_HOME@|$SHELLM_HOME|g" -e "s|@CODEX_HOME@|$CODEX_HOME|g" "$UNIT_SRC")
     if ! printf '%s\n' "$rendered" | cmp -s - "$UNIT_DST" 2>/dev/null; then
         echo "==> Unit file changed — re-installing $UNIT_DST"
         printf '%s\n' "$rendered" | sudo tee "$UNIT_DST" >/dev/null
         sudo systemctl daemon-reload
     fi
+fi
+
+# The archive capability is a separately hardened singleton. Install and
+# restart it before the web control plane so archive routes always fail closed
+# at the socket boundary rather than running Codex in the web cgroup.
+archive_unit_src="$APP_DIR/deploy/headlong-archive.service"
+if [[ -f "$archive_unit_src" ]]; then
+    # An external CODEX_HOME belongs to its operator. `install -d -o` also
+    # chowns an existing directory, which can lock that operator out of their
+    # own Codex state. Only provision the default/missing directory; access to
+    # an existing external home must be delegated explicitly by the operator.
+    if [[ -e "$CODEX_HOME" ]]; then
+        [[ -d "$CODEX_HOME" ]] \
+            || { echo "==> ERROR: CODEX_HOME is not a directory: $CODEX_HOME" >&2; exit 1; }
+    else
+        sudo install -d -o shellm -g shellm -m 0700 "$CODEX_HOME"
+    fi
+    sudo install -d -o shellm -g shellm -m 0700 "$APP_DIR/.assistant-authority"
+    archive_rendered=$(sed -e "s|@SHELLM_HOME@|$SHELLM_HOME|g" -e "s|@CODEX_HOME@|$CODEX_HOME|g" "$archive_unit_src")
+    if ! printf '%s\n' "$archive_rendered" | cmp -s - /etc/systemd/system/headlong-archive.service 2>/dev/null; then
+        echo "==> Installing hardened archive boundary"
+        printf '%s\n' "$archive_rendered" | sudo tee /etc/systemd/system/headlong-archive.service >/dev/null
+        sudo systemctl daemon-reload
+    fi
+    sudo systemctl enable --now headlong-archive.service >/dev/null
+    sudo systemctl try-restart headlong-archive.service >/dev/null
 fi
 
 # Per-identity thinkers: template unit + root wrapper + sudo rule. Synced
@@ -52,7 +105,7 @@ fi
 for unit_tpl in headlong-thinkers@ headlong-thinkers-alert@; do
     unit_src="$APP_DIR/deploy/${unit_tpl}.service"
     [[ -f "$unit_src" ]] || continue
-    rendered=$(sed "s|@SHELLM_HOME@|$SHELLM_HOME|g" "$unit_src")
+    rendered=$(sed -e "s|@SHELLM_HOME@|$SHELLM_HOME|g" -e "s|@CODEX_HOME@|$CODEX_HOME|g" "$unit_src")
     if ! printf '%s\n' "$rendered" | cmp -s - "/etc/systemd/system/${unit_tpl}.service" 2>/dev/null; then
         echo "==> Unit file changed — re-installing ${unit_tpl}"
         printf '%s\n' "$rendered" | sudo tee "/etc/systemd/system/${unit_tpl}.service" >/dev/null
@@ -63,10 +116,10 @@ done
 # Personal Assistant target + independently supervised source bridges. Keep
 # cursor and projection state in the identity directory; only running bridge
 # processes are restarted after code or unit updates.
-for unit_tpl in headlong-assistant-codex@ headlong-assistant-web@; do
+for unit_tpl in headlong-assistant-codex@ headlong-assistant-web@ headlong-assistant-alert@; do
     unit_src="$APP_DIR/deploy/${unit_tpl}.service"
     [[ -f "$unit_src" ]] || continue
-    rendered=$(sed "s|@SHELLM_HOME@|$SHELLM_HOME|g" "$unit_src")
+    rendered=$(sed -e "s|@SHELLM_HOME@|$SHELLM_HOME|g" -e "s|@CODEX_HOME@|$CODEX_HOME|g" "$unit_src")
     if ! printf '%s\n' "$rendered" | cmp -s - "/etc/systemd/system/${unit_tpl}.service" 2>/dev/null; then
         echo "==> Unit file changed — re-installing ${unit_tpl}"
         printf '%s\n' "$rendered" | sudo tee "/etc/systemd/system/${unit_tpl}.service" >/dev/null

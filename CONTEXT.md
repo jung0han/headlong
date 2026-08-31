@@ -129,9 +129,11 @@ _Avoid_: Memory Candidate, note
 
 **Memory Failure**:
 An observed case where memory has the wrong Knowledge Scope, contradicts its
-evidence, or materially degrades an Improvement Proposal or action. Duplicate
-or awkwardly worded memory is quality feedback but not by itself a Memory
-Failure.
+evidence, or materially degrades an Improvement Proposal or action; when
+behavior is affected, the user's report asserts the causal relationship and
+names the Proposal event or native action step with immutable evidence.
+Duplicate or awkwardly worded memory is quality feedback but not by itself a
+Memory Failure.
 _Avoid_: Hypothetical risk, duplicate memory
 
 **Historical Backfill**:

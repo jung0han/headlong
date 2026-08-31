@@ -33,6 +33,9 @@ import type {
   ShadowGateMemory,
   ShadowGateObservation,
   ShadowGateReport,
+  ArchiveCandidate,
+  ArchiveCandidateEvidence,
+  ArchiveExecution,
 } from "~/lib/types";
 
 export const API_BASE = import.meta.env.VITE_API_URL ?? "";
@@ -226,6 +229,56 @@ export function reviewProposal(
   return postJson(
     `/api/identities/${encodeURIComponent(identityId)}/proposals/${encodeURIComponent(proposalId)}/review`,
     { state }
+  );
+}
+
+export function fetchArchiveCandidates(
+  identityId: string
+): Promise<ArchiveCandidate[]> {
+  return getJson(
+    `/api/identities/${encodeURIComponent(identityId)}/archive-candidates`
+  );
+}
+
+export function fetchArchiveCandidateEvidence(
+  identityId: string,
+  candidateId: string,
+  index: number
+): Promise<ArchiveCandidateEvidence> {
+  return getJson(
+    `/api/identities/${encodeURIComponent(identityId)}/archive-candidates/${encodeURIComponent(candidateId)}/evidence/${index}`
+  );
+}
+
+export function reviewArchiveCandidate(
+  identityId: string,
+  candidateId: string,
+  state: ProposalReviewState
+): Promise<ArchiveCandidate> {
+  return postJson(
+    `/api/identities/${encodeURIComponent(identityId)}/archive-candidates/${encodeURIComponent(candidateId)}/review`,
+    { state }
+  );
+}
+
+export function retryArchiveCandidate(
+  identityId: string,
+  candidateId: string
+): Promise<ArchiveCandidate> {
+  return postJson(
+    `/api/identities/${encodeURIComponent(identityId)}/archive-candidates/${encodeURIComponent(candidateId)}/retry`,
+    {}
+  );
+}
+
+export function executeCodexArchive(
+  identityId: string,
+  sessionId: string,
+  operation: "archive" | "unarchive"
+): Promise<ArchiveExecution> {
+  return postJson(
+    `/api/identities/${encodeURIComponent(identityId)}/codex-sessions/${encodeURIComponent(sessionId)}/${operation}`,
+    {}
   );
 }
 

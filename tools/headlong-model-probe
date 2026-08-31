@@ -37,7 +37,8 @@ load_env_defaults() {
     [[ -f "$envfile" ]] || return 0
     while IFS= read -r key; do
         [[ -n "$key" && -z "${!key+x}" ]] || continue
-        # shellcheck disable=SC1090 -- same trusted operator config as llm/shellm
+        # Same trusted operator config as llm/shellm.
+        # shellcheck disable=SC1090
         value=$(set -a; . "$envfile" 2>/dev/null; printf '%s' "${!key}") || continue
         export "$key=$value"
     done < <(sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}\([A-Za-z_][A-Za-z0-9_]*\)[[:space:]]*=.*/\2/p' "$envfile")
@@ -131,6 +132,16 @@ case "$resolved_provider" in
     opencode|opencode-go) credential_ref=OPENCODE_API_KEY ;;
 esac
 
+structured_mode="${LLM_STRUCTURED_OUTPUT_MODE:-}"
+structured_source=configured
+if [[ -z "$structured_mode" ]]; then
+    structured_source=route_default
+    structured_mode=json_object
+elif [[ "$structured_mode" != strict && "$structured_mode" != json_object ]]; then
+    structured_mode=unknown
+    ok=false
+fi
+
 checked_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 tmp_health="$health_file.$$"
 jq -n \
@@ -140,6 +151,8 @@ jq -n \
     --arg model "$resolved_model" \
     --arg endpoint_ref "$endpoint_ref" \
     --arg credential_ref "$credential_ref" \
+    --arg structured_mode "$structured_mode" \
+    --arg structured_source "$structured_source" \
     --arg direct_status "$direct_status" \
     --arg direct_error "$direct_error" \
     --arg shellm_status "$shellm_status" \
@@ -148,7 +161,8 @@ jq -n \
       route:{provider:(if $provider == "" then null else $provider end),
              model:(if $model == "" then null else $model end),
              endpoint_ref:$endpoint_ref,
-             credential_ref:(if $credential_ref == "" then null else $credential_ref end)},
+             credential_ref:(if $credential_ref == "" then null else $credential_ref end),
+             structured_results:{mode:$structured_mode,source:$structured_source}},
       paths:{direct:({status:$direct_status} + (if $direct_error == "" then {} else {error:$direct_error} end)),
              shellm:({status:$shellm_status} + (if $shellm_error == "" then {} else {error:$shellm_error} end))}}' \
     >"$tmp_health"

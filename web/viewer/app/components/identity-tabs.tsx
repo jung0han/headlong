@@ -14,6 +14,7 @@ const TABS = [
   { key: "chat", label: "Chat", path: "/chat" },
   { key: "memories", label: "Memories", path: "/memories" },
   { key: "proposals", label: "Proposals", path: "/proposals" },
+  { key: "archive-candidates", label: "Archive", path: "/archive-candidates" },
   { key: "shadow", label: "Shadow gate", path: "/shadow" },
   { key: "config", label: "Config", path: "/config" },
 ] as const;

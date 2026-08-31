@@ -1,0 +1,43 @@
+# Minimal Codex archive capability. The web/bridge processes reach it only
+# through an authenticated, allowlisted AF_UNIX protocol.
+
+[Unit]
+Description=headlong hardened Codex archive boundary
+After=network-online.target
+Wants=network-online.target
+Before=headlong-web.service
+
+[Service]
+Type=simple
+User=shellm
+WorkingDirectory=@SHELLM_HOME@/app
+Environment="PATH=@SHELLM_HOME@/.local/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="CODEX_HOME=@CODEX_HOME@"
+RuntimeDirectory=headlong-archive
+RuntimeDirectoryMode=0700
+ExecCondition=/usr/bin/test -x /usr/bin/bwrap
+ExecCondition=/usr/bin/test -r @CODEX_HOME@
+ExecCondition=/usr/bin/test -x @CODEX_HOME@
+ExecCondition=/usr/bin/test -w @CODEX_HOME@/sessions
+ExecCondition=/usr/bin/test -w @CODEX_HOME@/archived_sessions
+ExecStart=/bin/bash @SHELLM_HOME@/app/tools/headlong-archive-boundary --root @SHELLM_HOME@/app --socket /run/headlong-archive/archive.sock
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+PrivateNetwork=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWritePaths=@CODEX_HOME@ @SHELLM_HOME@/app/.assistant-authority
+
+[Install]
+WantedBy=multi-user.target
