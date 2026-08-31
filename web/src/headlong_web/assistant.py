@@ -1850,6 +1850,14 @@ class PersonalAssistant:
                     state["failure_event_id"] = failed_id
                     state["last_error"] = exc.code
                     state["last_attempt_at"] = codex_analysis.format_time(now)
+                    state["consecutive_failures"] = (
+                        int(state.get("consecutive_failures") or 0) + 1
+                    )
+                    state["next_retry_at"] = codex_analysis.format_time(
+                        codex_analysis.retry_after(
+                            now, state["consecutive_failures"]
+                        )
+                    )
                     self._write_codex_analysis_state(source.id, state)
                     result["failed"] += 1
                     result["errors"].append(
@@ -1878,6 +1886,9 @@ class PersonalAssistant:
                 state["last_attempt_at"] = codex_analysis.format_time(now)
                 state["last_error"] = None
                 state["failure_event_id"] = None
+                state["failed_analysis_kind"] = None
+                state["consecutive_failures"] = 0
+                state["next_retry_at"] = None
                 self._write_codex_analysis_state(source.id, state)
                 result[due_kind] += 1
                 session_health.append(codex_analysis.health(state))
@@ -2050,6 +2061,8 @@ class PersonalAssistant:
             "failed_analysis_kind": None,
             "last_attempt_at": None,
             "last_error": None,
+            "consecutive_failures": 0,
+            "next_retry_at": None,
             "latest_success_event_id": latest_success,
             "supersession_event_id": supersession_id,
         }

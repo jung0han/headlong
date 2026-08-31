@@ -316,7 +316,9 @@ def test_integrated_runtime_preserves_current_learning_and_authorized_archive(
 
             clock.advance(minutes=5)
             current = assistant_runtime.process_codex_cycle(assistant, active, archived, capacity=2)
-            assert current["lanes"]["newly_eligible_analysis"]["progressed"] == 1
+            # Current work is admitted first; the second slot also recovers the
+            # malformed historical revision after its retry backoff expires.
+            assert current["lanes"]["newly_eligible_analysis"]["progressed"] == 2
             assert current["lanes"]["historical_backfill"]["backlog"] > 0
             _wait_for(identity, memory=True)
             assistant.capture_native_memory_mutations()

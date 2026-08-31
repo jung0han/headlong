@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
+from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -24,6 +26,18 @@ class AssistantServiceError(RuntimeError):
     """A deterministic assistant service boundary failed."""
 
 
+_LedgerSignature = tuple[
+    tuple[int, int, int, int] | None,
+    tuple[int, int, int, int] | None,
+]
+_LedgerCacheKey = tuple[str, str]
+_LEDGER_CACHE_LIMIT = 32
+_LEDGER_CACHE: OrderedDict[
+    _LedgerCacheKey, tuple[_LedgerSignature, tuple[dict[str, Any], ...]]
+] = OrderedDict()
+_LEDGER_CACHE_LOCK = threading.RLock()
+
+
 class ActivityLedger:
     """Own public trajectory appends and protected authority provenance."""
 
@@ -35,20 +49,31 @@ class ActivityLedger:
         self._write_observer_marker()
 
     def events(self) -> list[dict[str, Any]]:
-        public = [
-            event
-            for event in self._trajectory_events()
-            if event.get("type") not in authority.PROTECTED_EVENT_TYPES
-        ]
-        try:
-            protected = self.authority.read()
-        except authority.AuthorityJournalError as exc:
-            raise AssistantServiceError(str(exc)) from exc
-        combined = [*public, *protected]
-        # The two append boundaries retain one logical ledger order through
-        # their append timestamps. Stable input order resolves the vanishingly
-        # rare equal timestamp without making projections move on later reads.
-        return sorted(combined, key=_ledger_time)
+        trajectory_path = self._trajectory_path()
+        key = (str(trajectory_path), str(self.authority.events_file))
+        with _LEDGER_CACHE_LOCK:
+            signature = self._signature(trajectory_path)
+            cached = _LEDGER_CACHE.get(key)
+            if cached is not None and cached[0] == signature:
+                _LEDGER_CACHE.move_to_end(key)
+                return [dict(event) for event in cached[1]]
+
+            combined: list[dict[str, Any]] = []
+            stable_signature = signature
+            for _attempt in range(2):
+                combined = self._read_events(trajectory_path)
+                stable_signature = self._signature(trajectory_path)
+                if stable_signature == signature:
+                    break
+                signature = stable_signature
+            else:
+                return combined
+
+            _LEDGER_CACHE[key] = (stable_signature, tuple(combined))
+            _LEDGER_CACHE.move_to_end(key)
+            while len(_LEDGER_CACHE) > _LEDGER_CACHE_LIMIT:
+                _LEDGER_CACHE.popitem(last=False)
+            return [dict(event) for event in combined]
 
     def recovery_events(self) -> list[dict[str, Any]]:
         """Read the complete ledger without the viewer's malformed-line tolerance."""
@@ -88,6 +113,7 @@ class ActivityLedger:
                 self.authority.append(event)
             except authority.AuthorityJournalError as exc:
                 raise AssistantServiceError(str(exc)) from exc
+            self._invalidate_snapshot()
             return
         proc = subprocess.run(
             [
@@ -107,12 +133,42 @@ class ActivityLedger:
         if proc.returncode != 0:
             detail = (proc.stderr or "trajectory append failed").strip().splitlines()[-1]
             raise AssistantServiceError(detail)
+        self._invalidate_snapshot()
 
-    def _trajectory_events(self) -> list[dict[str, Any]]:
+    def _trajectory_path(self) -> Path:
         traj_dir = discovery.find_root_traj_dir(self.identity)
         if traj_dir is None:
             raise AssistantServiceError("Observer Identity has no root trajectory")
-        return list(trajectory.iter_jsonl(traj_dir / "trajectory.jsonl"))
+        return traj_dir / "trajectory.jsonl"
+
+    def _read_events(self, trajectory_path: Path) -> list[dict[str, Any]]:
+        public = [
+            event
+            for event in trajectory.iter_jsonl(trajectory_path)
+            if event.get("type") not in authority.PROTECTED_EVENT_TYPES
+        ]
+        try:
+            protected = self.authority.read()
+        except authority.AuthorityJournalError as exc:
+            raise AssistantServiceError(str(exc)) from exc
+        # The two append boundaries retain one logical ledger order through
+        # their append timestamps. Stable input order resolves the vanishingly
+        # rare equal timestamp without making projections move on later reads.
+        return sorted([*public, *protected], key=_ledger_time)
+
+    def _signature(self, trajectory_path: Path) -> _LedgerSignature:
+        try:
+            return (
+                _file_signature(trajectory_path),
+                _file_signature(self.authority.events_file),
+            )
+        except OSError as exc:
+            raise AssistantServiceError("cannot inspect Activity Ledger") from exc
+
+    def _invalidate_snapshot(self) -> None:
+        key = (str(self._trajectory_path()), str(self.authority.events_file))
+        with _LEDGER_CACHE_LOCK:
+            _LEDGER_CACHE.pop(key, None)
 
     def _write_observer_marker(self) -> None:
         directory = self.root / ".assistant-observers"
@@ -170,12 +226,16 @@ class GovernanceService:
     def archive_candidates(self) -> list[dict[str, Any]]:
         try:
             events = self.ledger.events()
+            candidates = archive_candidates.build_inbox(events)
+            executions = archive_execution.candidate_executions(
+                events, (candidate["candidate_id"] for candidate in candidates)
+            )
             return [
                 {
                     **candidate,
-                    **archive_execution.candidate_execution(events, candidate["candidate_id"]),
+                    **executions[candidate["candidate_id"]],
                 }
-                for candidate in archive_candidates.build_inbox(events)
+                for candidate in candidates
             ]
         except (
             archive_candidates.ArchiveCandidateError,
@@ -405,3 +465,11 @@ def _ledger_time(event: dict[str, Any]) -> float:
         return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
     except ValueError:
         return float("-inf")
+
+
+def _file_signature(path: Path) -> tuple[int, int, int, int] | None:
+    try:
+        value = path.stat()
+    except FileNotFoundError:
+        return None
+    return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns)

@@ -351,19 +351,48 @@ def result_event(
     }
 
 
-def candidate_execution(events: Iterable[dict[str, Any]], candidate_id: str) -> dict[str, Any]:
-    candidate_id = _uuid(candidate_id, "candidate id")
-    attempts: dict[str, dict[str, Any]] = {}
-    results: dict[str, dict[str, Any]] = {}
+def candidate_executions(
+    events: Iterable[dict[str, Any]], candidate_ids: Iterable[str]
+) -> dict[str, dict[str, Any]]:
+    """Project execution state for any number of candidates in one ledger scan."""
+    requested = {
+        _uuid(candidate_id, "candidate id") for candidate_id in candidate_ids
+    }
+    attempts: dict[str, dict[str, dict[str, Any]]] = {
+        candidate_id: {} for candidate_id in requested
+    }
+    results: dict[str, dict[str, dict[str, Any]]] = {
+        candidate_id: {} for candidate_id in requested
+    }
     for event in events:
         if event.get("archive_attempt_schema") == ATTEMPT_SCHEMA:
             attempt = _attempt(event)
-            if attempt["candidate_id"] == candidate_id and attempt["operation"] == "archive":
-                attempts[attempt["event_id"]] = attempt
+            candidate_id = attempt["candidate_id"]
+            if candidate_id in requested and attempt["operation"] == "archive":
+                attempts[candidate_id][attempt["event_id"]] = attempt
         elif event.get("archive_result_schema") == RESULT_SCHEMA:
             result = _result(event)
-            if result["candidate_id"] == candidate_id and result["operation"] == "archive":
-                results[result["attempt_id"]] = result
+            candidate_id = result["candidate_id"]
+            if candidate_id in requested and result["operation"] == "archive":
+                results[candidate_id][result["attempt_id"]] = result
+    return {
+        candidate_id: _candidate_execution(
+            attempts[candidate_id], results[candidate_id]
+        )
+        for candidate_id in requested
+    }
+
+
+def candidate_execution(
+    events: Iterable[dict[str, Any]], candidate_id: str
+) -> dict[str, Any]:
+    candidate_id = _uuid(candidate_id, "candidate id")
+    return candidate_executions(events, [candidate_id])[candidate_id]
+
+
+def _candidate_execution(
+    attempts: dict[str, dict[str, Any]], results: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
     ordered = sorted(attempts.values(), key=lambda item: item["attempt_number"])
     if not ordered:
         return {

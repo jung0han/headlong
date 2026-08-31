@@ -16,6 +16,8 @@ ANALYSIS_SCHEMA = "headlong.codex-observation/v1"
 ANALYSIS_STATE_SCHEMA = "headlong.codex-analysis-state/v1"
 PROVISIONAL_AFTER = timedelta(minutes=5)
 FINAL_AFTER = timedelta(minutes=30)
+RETRY_BASE = timedelta(minutes=1)
+RETRY_MAX = timedelta(minutes=15)
 MAX_TITLE = 160
 MAX_CONTENT = 1200
 MAX_FINDINGS = 1
@@ -220,10 +222,25 @@ def due_kind(state: dict[str, Any], source_root: str, now: datetime) -> str | No
     """Return the one analysis kind due for this revision, if any."""
     inactive = now - parse_time(state["last_activity_at"])
     if source_root == "archived" or inactive >= FINAL_AFTER:
-        return None if state.get("final_event_id") else "final"
-    if inactive >= PROVISIONAL_AFTER:
-        return None if state.get("provisional_event_id") else "provisional"
-    return None
+        analysis_kind = None if state.get("final_event_id") else "final"
+    elif inactive >= PROVISIONAL_AFTER:
+        analysis_kind = None if state.get("provisional_event_id") else "provisional"
+    else:
+        analysis_kind = None
+    if analysis_kind is None or state.get("failed_analysis_kind") != analysis_kind:
+        return analysis_kind
+    retry_at = state.get("next_retry_at")
+    if retry_at and now < parse_time(retry_at):
+        return None
+    return analysis_kind
+
+
+def retry_after(now: datetime, consecutive_failures: int) -> datetime:
+    """Return the bounded exponential retry time for one failed revision."""
+    failures = max(1, int(consecutive_failures))
+    exponent = min(failures - 1, 4)
+    delay = min(RETRY_BASE * (2**exponent), RETRY_MAX)
+    return now + delay
 
 
 def supersedes(state: dict[str, Any], analysis_kind: str) -> list[str]:
@@ -244,6 +261,8 @@ def health(state: dict[str, Any]) -> dict[str, Any]:
         "last_activity_at": state["last_activity_at"],
         "status": state["status"],
         "last_error": state.get("last_error"),
+        "consecutive_failures": int(state.get("consecutive_failures") or 0),
+        "next_retry_at": state.get("next_retry_at"),
     }
 
 

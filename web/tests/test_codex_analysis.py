@@ -376,6 +376,7 @@ def test_model_failure_keeps_cursor_and_final_marker_retriable(
         assert structured["last_error"] == "route_failure"
 
         model.fail = False
+        clock.advance(minutes=1)
         retried = assistant.analyze_codex_once(active, archived)
         assert retried["final"] == 1
         assert json.loads(cursor_path.read_text()) == cursor_before
@@ -389,6 +390,59 @@ def test_model_failure_keeps_cursor_and_final_marker_retriable(
             event for event in _events(identity) if event.get("analysis_state") == "failed"
         )
         assert failed["event_id"] in final["supersedes_event_ids"]
+
+
+def test_failed_revision_obeys_exponential_retry_backoff(
+    tmp_path: Path, monkeypatch, capsys
+):
+    identity, active, archived, assistant = _archived_assistant(tmp_path, capsys)
+    clock = assistant._clock
+
+    with FakeLiteLLM() as model:
+        _configure_model(monkeypatch, model, tmp_path)
+        model.fail = True
+
+        first = assistant.process_codex_once(active, archived)
+        assert first["analysis"]["failed"] == 1
+        assert len(model.calls) == 1
+
+        immediate = assistant.analyze_codex_once(active, archived)
+        assert immediate["failed"] == 0
+        assert immediate["waiting"] == 1
+        assert len(model.calls) == 1
+
+        clock.advance(seconds=59)
+        before_first_retry = assistant.analyze_codex_once(active, archived)
+        assert before_first_retry["failed"] == 0
+        assert len(model.calls) == 1
+
+        clock.advance(seconds=1)
+        first_retry = assistant.analyze_codex_once(active, archived)
+        assert first_retry["failed"] == 1
+        assert len(model.calls) == 2
+
+        clock.advance(minutes=1)
+        before_second_retry = assistant.analyze_codex_once(active, archived)
+        assert before_second_retry["failed"] == 0
+        assert len(model.calls) == 2
+
+        model.fail = False
+        clock.advance(minutes=1)
+        recovered = assistant.analyze_codex_once(active, archived)
+        assert recovered["final"] == 1
+        assert len(model.calls) == 3
+
+    state = json.loads(
+        (
+            identity
+            / "assistant"
+            / "analysis"
+            / "codex"
+            / f"{SESSION_ID}.json"
+        ).read_text()
+    )
+    assert state["consecutive_failures"] == 0
+    assert state["next_retry_at"] is None
 
 
 @pytest.mark.parametrize(
