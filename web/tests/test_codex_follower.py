@@ -60,6 +60,55 @@ def _follow(root: Path, active: Path, archived: Path) -> int:
     )
 
 
+def test_large_session_backlog_yields_after_one_bounded_collection_batch(
+    tmp_path: Path, capsys
+):
+    root = tmp_path / "headlong"
+    root.mkdir()
+    identity = _identity(root)
+    project = tmp_path / "registered"
+    project.mkdir()
+    active = tmp_path / "codex" / "sessions"
+    archived = tmp_path / "codex" / "archived_sessions"
+    active.mkdir(parents=True)
+    session = active / "large.jsonl"
+    rows = [_meta(SESSION_ID, project)] + [
+        _row({"type": "event_msg", "payload": {"sequence": index}})
+        for index in range(34)
+    ]
+    session.write_bytes(b"\n".join(rows) + b"\n")
+
+    assert _command(root, "project", "add", str(project)) == 0
+    capsys.readouterr()
+    assert _follow(root, active, archived) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first["appended"] == 32
+    assert first["deferred"] == 1
+    cursor = json.loads(
+        (
+            identity
+            / "assistant"
+            / "cursors"
+            / "codex"
+            / f"{SESSION_ID}.json"
+        ).read_text()
+    )
+    assert cursor["line"] == 32
+
+    assert _follow(root, active, archived) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert second["appended"] == 3
+    assert second["deferred"] == 0
+    ledger = identity / "trajectories" / "aaaaaaaa-root" / "trajectory.jsonl"
+    source_events = [
+        event
+        for event in map(json.loads, ledger.read_text().splitlines())
+        if event.get("type") == "activity-source-event"
+    ]
+    assert len(source_events) == 35
+    assert len({event["event_id"] for event in source_events}) == 35
+
+
 def test_active_session_append_partial_line_and_restart_are_lossless_and_idempotent(
     tmp_path: Path, capsys
 ):

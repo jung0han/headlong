@@ -69,6 +69,7 @@ _MAX_MEMORY_KEY = 120
 _MAX_CODEX_ANALYSIS_PROMPT_BYTES = 128 * 1024
 _MAX_CODEX_ANALYSIS_RECORD_BYTES = 16 * 1024
 _CODEX_ANALYSIS_MAX_TOKENS = 4096
+_CODEX_COLLECTION_MAX_ROWS = 32
 
 
 class AssistantError(RuntimeError):
@@ -1735,10 +1736,16 @@ class PersonalAssistant:
                 else:
                     start_index = len(segments) - 1
                 advanced = False
+                processed_rows = 0
+                capacity_exhausted = False
                 current_source = segment_source(source, segments[start_index])
                 offset = 0
                 line = 0
                 for index in range(start_index, len(segments)):
+                    if processed_rows >= _CODEX_COLLECTION_MAX_ROWS:
+                        result["deferred"] += 1
+                        capacity_exhausted = True
+                        break
                     current_source = segment_source(source, segments[index])
                     segment_cursor = cursor if index == start_index else None
                     offset, line = resume_position(current_source, segment_cursor)
@@ -1747,6 +1754,10 @@ class PersonalAssistant:
                     try:
                         rows = complete_rows(current_source.path, offset)
                         for raw_offset, raw in rows:
+                            if processed_rows >= _CODEX_COLLECTION_MAX_ROWS:
+                                result["deferred"] += 1
+                                capacity_exhausted = True
+                                break
                             line += 1
                             locator = EvidenceLocator(
                                 source_identity=source.id,
@@ -1774,8 +1785,11 @@ class PersonalAssistant:
                                 current_source, offset, line, locator
                             )
                             advanced = True
+                            processed_rows += 1
                     except CodexBridgeError as exc:
                         raise AssistantError(str(exc)) from exc
+                    if capacity_exhausted:
+                        break
                     if current_source.path.stat().st_size > offset:
                         result["deferred"] += 1
                         break
