@@ -255,3 +255,63 @@ def test_newly_archived_session_is_consolidated_before_historical_backfill(
         assert not any(
             event.get("source_identity") == old_id for event in _events(identity)
         )
+
+
+def test_active_lane_resumes_a_later_rollout_shard(tmp_path: Path) -> None:
+    root = tmp_path / "headlong"
+    root.mkdir()
+    identity = _identity(root)
+    project = tmp_path / "project"
+    project.mkdir()
+    active = tmp_path / "codex" / "sessions"
+    archived = tmp_path / "codex" / "archived_sessions"
+    active.mkdir(parents=True)
+    archived.mkdir(parents=True)
+    session_id = str(uuid.UUID(int=5_000))
+
+    def shard(start: str, end: str, message: str) -> bytes:
+        return _row(
+            {
+                "timestamp": start,
+                "type": "session_meta",
+                "payload": {"id": session_id, "cwd": str(project)},
+            }
+        ) + _row(
+            {
+                "timestamp": end,
+                "type": "event_msg",
+                "payload": {"type": "agent_message", "message": message},
+            }
+        )
+
+    first_path = active / "rollout-first.jsonl"
+    first_path.write_bytes(
+        shard("2026-08-27T00:00:00Z", "2026-08-27T00:01:00Z", "first")
+    )
+    clock = FakeClock(datetime(2026, 8, 27, 0, 1, tzinfo=timezone.utc))
+    assistant = PersonalAssistant(root, resolve_observer(root, "observer"), clock=clock)
+    assistant.add_project(project)
+
+    first = assistant_runtime.process_codex_cycle(assistant, active, archived)
+    assert first["status"] == "ok"
+    assert first["lanes"]["active_collection"]["progressed"] == 1
+
+    second_path = active / "rollout-second.jsonl"
+    second_path.write_bytes(
+        shard("2026-08-27T00:02:00Z", "2026-08-27T00:03:00Z", "second")
+    )
+    second = assistant_runtime.process_codex_cycle(assistant, active, archived)
+    assert second["status"] == "ok"
+    assert second["collection"]["errors"] == []
+    assert second["lanes"]["active_collection"]["progressed"] == 1
+
+    cursor = json.loads(
+        (
+            identity
+            / "assistant"
+            / "cursors"
+            / "codex"
+            / f"{session_id}.json"
+        ).read_text()
+    )
+    assert cursor["relative_path"] == second_path.name

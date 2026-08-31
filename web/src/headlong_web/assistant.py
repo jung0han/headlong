@@ -47,8 +47,11 @@ from headlong_web.codex_bridge import (
     CodexBridgeError,
     CodexSource,
     complete_rows,
+    cursor_segment_index,
     discover_sources,
     resume_position,
+    segment_source,
+    source_segments,
 )
 
 REGISTRATION_SCHEMA = "headlong.assistant.registrations/v1"
@@ -1656,49 +1659,74 @@ class PersonalAssistant:
                     continue
                 result["eligible"] += 1
                 cursor = self._read_codex_cursor(source.id)
-                offset, line = resume_position(source, cursor)
-                if cursor is not None and offset == 0:
-                    result["recovered"] += 1
+                segments = source_segments(source)
+                matched_index = cursor_segment_index(source, cursor)
+                if cursor is None:
+                    start_index = 0
+                elif matched_index is not None:
+                    start_index = matched_index
+                else:
+                    start_index = len(segments) - 1
                 advanced = False
-                try:
-                    rows = complete_rows(source.path, offset)
-                    for raw_offset, raw in rows:
-                        line += 1
-                        locator = EvidenceLocator(
-                            source_identity=source.id,
-                            source_root=source.source_root,
-                            relative_path=source.relative_path,
-                            line=line,
-                            byte_offset=raw_offset,
-                            byte_length=len(raw),
-                            sha256=hashlib.sha256(raw).hexdigest(),
-                            host=socket.gethostname(),
-                        )
-                        event_id = _source_event_id(project.id, locator)
-                        if event_id in ledger_ids:
-                            result["duplicate"] += 1
-                        else:
-                            self._append_event(source_event(event_id, project, source, locator, raw))
-                            ledger_ids.add(event_id)
-                            result["appended"] += 1
-                        offset = raw_offset + len(raw)
-                        self._write_codex_cursor(source, offset, line, locator)
-                        advanced = True
-                except CodexBridgeError as exc:
-                    raise AssistantError(str(exc)) from exc
-                if cursor is not None and not advanced and _cursor_moved(cursor, source):
+                current_source = segment_source(source, segments[start_index])
+                offset = 0
+                line = 0
+                for index in range(start_index, len(segments)):
+                    current_source = segment_source(source, segments[index])
+                    segment_cursor = cursor if index == start_index else None
+                    offset, line = resume_position(current_source, segment_cursor)
+                    if cursor is not None and index == start_index and offset == 0:
+                        result["recovered"] += 1
+                    try:
+                        rows = complete_rows(current_source.path, offset)
+                        for raw_offset, raw in rows:
+                            line += 1
+                            locator = EvidenceLocator(
+                                source_identity=source.id,
+                                source_root=current_source.source_root,
+                                relative_path=current_source.relative_path,
+                                line=line,
+                                byte_offset=raw_offset,
+                                byte_length=len(raw),
+                                sha256=hashlib.sha256(raw).hexdigest(),
+                                host=socket.gethostname(),
+                            )
+                            event_id = _source_event_id(project.id, locator)
+                            if event_id in ledger_ids:
+                                result["duplicate"] += 1
+                            else:
+                                self._append_event(
+                                    source_event(
+                                        event_id, project, current_source, locator, raw
+                                    )
+                                )
+                                ledger_ids.add(event_id)
+                                result["appended"] += 1
+                            offset = raw_offset + len(raw)
+                            self._write_codex_cursor(
+                                current_source, offset, line, locator
+                            )
+                            advanced = True
+                    except CodexBridgeError as exc:
+                        raise AssistantError(str(exc)) from exc
+                    if current_source.path.stat().st_size > offset:
+                        result["deferred"] += 1
+                        break
+                if (
+                    cursor is not None
+                    and not advanced
+                    and _cursor_moved(cursor, current_source)
+                ):
                     self._write_codex_cursor(
-                        source,
+                        current_source,
                         offset,
                         line,
                         EvidenceLocator.decode(cursor["last_complete_locator"]),
                     )
-                if source.path.stat().st_size > offset:
-                    result["deferred"] += 1
                 current_cursor = self._read_codex_cursor(source.id)
                 if current_cursor is not None:
                     self._sync_analysis_revision(
-                        project, source, current_cursor, observed_at
+                        project, current_source, current_cursor, observed_at
                     )
             self._write_source_health("codex", "collection", result)
         return result
@@ -3106,39 +3134,52 @@ def _source_revision(
 ) -> tuple[str, list[tuple[EvidenceLocator, bytes]]]:
     """Hash and address exactly the complete source prefix represented by a cursor."""
     try:
-        limit = int(cursor["byte_offset"])
+        cursor_limit = int(cursor["byte_offset"])
     except (KeyError, TypeError, ValueError) as exc:
         raise AssistantError(f"invalid Codex cursor for analysis: {source.id}") from exc
+    segments = source_segments(source)
+    current_index = cursor_segment_index(source, cursor)
+    if current_index is None:
+        if len(segments) != 1:
+            raise AssistantError(
+                f"Codex cursor does not identify a rollout shard: {source.id}"
+            )
+        current_index = 0
     digest = hashlib.sha256()
     rows: list[tuple[EvidenceLocator, bytes]] = []
-    consumed = 0
-    line = 0
-    try:
-        for offset, raw in complete_rows(source.path, 0):
-            if offset + len(raw) > limit:
-                break
-            line += 1
-            digest.update(raw)
-            consumed += len(raw)
-            rows.append(
-                (
-                    EvidenceLocator(
-                        source_identity=source.id,
-                        source_root=source.source_root,
-                        relative_path=source.relative_path,
-                        line=line,
-                        byte_offset=offset,
-                        byte_length=len(raw),
-                        sha256=hashlib.sha256(raw).hexdigest(),
-                        host=socket.gethostname(),
-                    ),
-                    raw,
+    for index, segment in enumerate(segments[: current_index + 1]):
+        physical = segment_source(source, segment)
+        limit = cursor_limit if index == current_index else physical.path.stat().st_size
+        consumed = 0
+        line = 0
+        try:
+            for offset, raw in complete_rows(physical.path, 0):
+                if offset + len(raw) > limit:
+                    break
+                line += 1
+                digest.update(raw)
+                consumed += len(raw)
+                rows.append(
+                    (
+                        EvidenceLocator(
+                            source_identity=source.id,
+                            source_root=physical.source_root,
+                            relative_path=physical.relative_path,
+                            line=line,
+                            byte_offset=offset,
+                            byte_length=len(raw),
+                            sha256=hashlib.sha256(raw).hexdigest(),
+                            host=socket.gethostname(),
+                        ),
+                        raw,
+                    )
                 )
+        except (OSError, CodexBridgeError) as exc:
+            raise AssistantError(str(exc)) from exc
+        if consumed != limit:
+            raise AssistantError(
+                f"Codex cursor does not describe a complete prefix: {source.id}"
             )
-    except CodexBridgeError as exc:
-        raise AssistantError(str(exc)) from exc
-    if consumed != limit:
-        raise AssistantError(f"Codex cursor does not describe a complete prefix: {source.id}")
     return digest.hexdigest(), rows
 
 

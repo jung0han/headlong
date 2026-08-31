@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from headlong_web import codex_analysis
-from headlong_web.codex_bridge import CodexSource, discover_sources, resume_position
+from headlong_web.codex_bridge import CodexSource, discover_sources, source_has_delta
 
 if TYPE_CHECKING:
     from headlong_web.assistant import PersonalAssistant, RegisteredProject
@@ -225,9 +225,8 @@ class CodexScheduler:
         historical: list[CodexSource] = []
         for source in sources:
             cursor = self.assistant._read_codex_cursor(source.id)
-            offset, _line = resume_position(source, cursor)
             try:
-                has_delta = source.path.stat().st_size > offset
+                has_delta = source_has_delta(source, cursor)
             except OSError:
                 continue
             if source.source_root == "active" and has_delta:
@@ -293,10 +292,12 @@ class CodexScheduler:
         state["updated_at"] = now
         self.assistant._write_state_json(self.state_path, state)
 
-    def _cursor_offsets(self, session_ids: set[str]) -> dict[str, int | None]:
+    def _cursor_offsets(
+        self, session_ids: set[str]
+    ) -> dict[str, tuple[str, int] | None]:
         return {
             session_id: (
-                int(cursor["byte_offset"])
+                (str(cursor.get("canonical_path") or ""), int(cursor["byte_offset"]))
                 if (cursor := self.assistant._read_codex_cursor(session_id))
                 else None
             )
@@ -304,12 +305,16 @@ class CodexScheduler:
         }
 
     def _cursor_progress(
-        self, session_ids: set[str], before: dict[str, int | None]
+        self,
+        session_ids: set[str],
+        before: dict[str, tuple[str, int] | None],
     ) -> int:
         return len(self._cursor_progress_ids(session_ids, before))
 
     def _cursor_progress_ids(
-        self, session_ids: set[str], before: dict[str, int | None]
+        self,
+        session_ids: set[str],
+        before: dict[str, tuple[str, int] | None],
     ) -> set[str]:
         after = self._cursor_offsets(session_ids)
         return {
