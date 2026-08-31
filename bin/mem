@@ -54,6 +54,12 @@ slugify() {
         | cut -c1-80
 }
 
+# Return at most 80 Unicode characters from the first line. Byte-oriented
+# truncation can split a multibyte UTF-8 sequence and poison every later read.
+summary_line() {
+    jq -Rrs 'split("\n")[0] | .[0:80]'
+}
+
 # Extract a field from YAML frontmatter.
 # Usage: frontmatter_field <file> <field>
 frontmatter_field() {
@@ -138,7 +144,7 @@ action_add() {
     hex=$(head -c4 /dev/urandom | od -An -tx1 | tr -d ' \n')
     slug=$(slugify "$text")
     filename="${timestamp}_${hex}_${slug}"
-    summary=$(printf '%s' "$text" | head -1 | cut -c1-80)
+    summary=$(printf '%s' "$text" | summary_line)
     created=$(date +"%Y-%m-%d %H:%M:%S")
     if [[ -n "$knowledge_scope" ]]; then
         context_block="knowledge_scope: $knowledge_scope
@@ -310,7 +316,7 @@ action_edit() {
 
     # Extract frontmatter fields
     local summary type created id knowledge_scope evidence_locators
-    summary=$(printf '%s' "$text" | head -1 | head -c 80)
+    summary=$(printf '%s' "$text" | summary_line)
     type=$(frontmatter_field "$file" "type")
     created=$(frontmatter_field "$file" "created")
     id=$(frontmatter_field "$file" "id")
