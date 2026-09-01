@@ -29,6 +29,13 @@ run by a dispatcher. The identity has a name (default `ada`), and that
 name becomes a shell command. A local web dashboard shows the mind's
 trajectory.
 
+## Project memory
+
+Before architecture, identity, trajectory, installation, bridge, or test-spec
+work, search [lat.md/](lat.md/) with `lat search`. Update the owning
+current-state page only when its fact changes and complete graph changes with
+`lat check`. This file, the README, and current source remain authoritative.
+
 ## Install without a tty
 
 With no tty the installer asks nothing; every answer comes from an
